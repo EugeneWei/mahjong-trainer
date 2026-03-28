@@ -1,8 +1,9 @@
-// Monte Carlo simulation results panel
+// Hybrid analysis results panel
 // Shows EV-ranked discard recommendations with win rate, average fan, and fan distribution
+// Displays "Exact Analysis" or "Monte Carlo (N sims)" badge based on method used
 
 import TileSVG from '../tiles/TileSVG';
-import type { MonteCarloResult } from '../../engine/montecarlo';
+import type { MonteCarloResult, AnalysisMethod } from '../../engine/montecarlo';
 import type { RulesetMode } from '../../engine/rulesets';
 import { getRulesetConfig } from '../../engine/rulesets';
 import { tileFullName } from '../../engine/analysis';
@@ -13,6 +14,8 @@ interface MonteCarloPanelProps {
   isRunning: boolean;
   error: string | null;
   rulesetMode: RulesetMode;
+  method?: AnalysisMethod | null;
+  shanten?: number | null;
   onRun?: () => void;
 }
 
@@ -22,38 +25,65 @@ export default function MonteCarloPanel({
   isRunning,
   error,
   rulesetMode,
+  method,
+  shanten,
   onRun,
 }: MonteCarloPanelProps) {
   const config = getRulesetConfig(rulesetMode);
   const unit = config.unit;
+
+  const isExact = method?.type === 'exact';
+  const methodLabel = method?.label ?? 'Monte Carlo Simulation';
 
   return (
     <div className="space-y-3">
       {/* Header */}
       <div className="bg-slate-800/50 rounded-lg p-3">
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-sm font-medium text-slate-300">
-            Monte Carlo Simulation
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium text-slate-300">
+              {isExact ? 'Exact Analysis' : 'Monte Carlo Simulation'}
+            </h3>
+            {method && (
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  isExact
+                    ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-700/50'
+                    : 'bg-blue-900/50 text-blue-400 border border-blue-700/50'
+                }`}
+              >
+                {isExact ? 'Exact' : `MC ${(method as { simulations: number }).simulations} sims`}
+              </span>
+            )}
+          </div>
           {onRun && !isRunning && (
             <button
               onClick={onRun}
               className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1 rounded"
             >
-              {results ? 'Re-run' : 'Run Simulation'}
+              {results ? 'Re-run' : 'Run Analysis'}
             </button>
           )}
         </div>
         <p className="text-xs text-slate-500">
-          Payout-weighted expected value via random game continuations
+          {isExact
+            ? shanten === 0
+              ? 'Exact enumeration of all winning tiles and their payouts'
+              : 'Exhaustive 2-ply search of all draw/discard sequences'
+            : 'Payout-weighted expected value via random game continuations'}
         </p>
+        {shanten != null && shanten >= 0 && (
+          <p className="text-[10px] text-slate-600 mt-0.5">
+            Shanten: {shanten} — {methodLabel}
+          </p>
+        )}
       </div>
 
       {/* Progress bar */}
       {isRunning && (
         <div className="bg-slate-800/50 rounded-lg p-3">
           <div className="flex items-center justify-between text-xs text-slate-400 mb-1.5">
-            <span>Simulating...</span>
+            <span>{isExact ? 'Computing...' : 'Simulating...'}</span>
             <span>{Math.round(progress * 100)}%</span>
           </div>
           <div className="w-full bg-slate-700 rounded-full h-1.5">
@@ -68,7 +98,7 @@ export default function MonteCarloPanel({
       {/* Error */}
       {error && (
         <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-3 text-xs text-red-300">
-          Simulation error: {error}
+          Analysis error: {error}
         </div>
       )}
 
@@ -89,6 +119,7 @@ export default function MonteCarloPanel({
                   isBest={idx === 0}
                   unit={unit}
                   maxEV={results[0].avgPayout}
+                  isExact={isExact}
                 />
               ))}
             </div>
@@ -96,7 +127,7 @@ export default function MonteCarloPanel({
 
           {/* Path comparison: top 2 */}
           {results.length >= 2 && results[0].avgPayout > 0 && results[1].avgPayout > 0 && (
-            <PathComparison a={results[0]} b={results[1]} unit={unit} />
+            <PathComparison a={results[0]} b={results[1]} unit={unit} isExact={isExact} />
           )}
         </>
       )}
@@ -104,13 +135,13 @@ export default function MonteCarloPanel({
       {/* No results yet and not running */}
       {!results && !isRunning && !error && (
         <div className="bg-slate-800/30 rounded-lg p-4 text-center text-xs text-slate-500">
-          Monte Carlo simulation will estimate payout-weighted EV for each discard option.
+          Analysis will estimate payout-weighted EV for each discard option.
           {onRun && (
             <button
               onClick={onRun}
               className="block mx-auto mt-2 text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded"
             >
-              Run Simulation
+              Run Analysis
             </button>
           )}
         </div>
@@ -125,12 +156,14 @@ function DiscardEVRow({
   isBest,
   unit,
   maxEV,
+  isExact,
 }: {
   result: MonteCarloResult;
   rank: number;
   isBest: boolean;
   unit: string;
   maxEV: number;
+  isExact: boolean;
 }) {
   const winPct = (result.winRate * 100).toFixed(1);
   const evDisplay = result.avgPayout.toFixed(1);
@@ -151,7 +184,7 @@ function DiscardEVRow({
               EV: {evDisplay}
             </span>
             <span className="text-xs text-slate-400">
-              {winPct}% win
+              {winPct}% win{isExact ? '' : ' (approx)'}
             </span>
             {result.avgFan > 0 && (
               <span className="text-xs text-slate-500">
@@ -171,7 +204,7 @@ function DiscardEVRow({
 
       {/* Fan distribution */}
       {Object.keys(result.fanDistribution).length > 0 && (
-        <FanDistributionBar distribution={result.fanDistribution} unit={unit} sims={result.simulations} />
+        <FanDistributionBar distribution={result.fanDistribution} unit={unit} sims={result.simulations} isExact={isExact} />
       )}
 
       {/* Best hand seen */}
@@ -188,17 +221,22 @@ function FanDistributionBar({
   distribution,
   unit,
   sims,
+  isExact,
 }: {
   distribution: Record<number, number>;
   unit: string;
   sims: number;
+  isExact: boolean;
 }) {
   const entries = Object.entries(distribution)
     .map(([fan, count]) => ({ fan: Number(fan), count }))
     .sort((a, b) => a.fan - b.fan);
 
-  const totalWins = entries.reduce((sum, e) => sum + e.count, 0);
-  if (totalWins === 0) return null;
+  const totalCount = entries.reduce((sum, e) => sum + e.count, 0);
+  if (totalCount === 0) return null;
+
+  // For exact analysis, sims is 0, so use totalCount as the denominator
+  const denominator = isExact ? totalCount : sims;
 
   // Color gradient by fan value
   const fanColor = (fan: number): string => {
@@ -216,15 +254,15 @@ function FanDistributionBar({
           <div
             key={fan}
             className={`${fanColor(fan)} relative group`}
-            style={{ width: `${(count / sims) * 100}%` }}
-            title={`${fan} ${unit}: ${count} wins (${((count / sims) * 100).toFixed(1)}%)`}
+            style={{ width: `${(count / totalCount) * 100}%` }}
+            title={`${fan} ${unit}: ${count} ${isExact ? 'outs' : 'wins'} (${((count / denominator) * 100).toFixed(1)}%)`}
           />
         ))}
       </div>
       <div className="flex flex-wrap gap-x-2 gap-y-0 mt-0.5">
         {entries.map(({ fan, count }) => (
           <span key={fan} className="text-[10px] text-slate-500">
-            {fan}{unit}: {((count / sims) * 100).toFixed(0)}%
+            {fan}{unit}: {isExact ? `${count} outs` : `${((count / denominator) * 100).toFixed(0)}%`}
           </span>
         ))}
       </div>
@@ -236,10 +274,12 @@ function PathComparison({
   a,
   b,
   unit,
+  isExact,
 }: {
   a: MonteCarloResult;
   b: MonteCarloResult;
   unit: string;
+  isExact: boolean;
 }) {
   const evDiff = a.avgPayout - b.avgPayout;
   const winDiff = (a.winRate - b.winRate) * 100;
@@ -261,10 +301,10 @@ function PathComparison({
                  hands more than compensate</>
             )}
             {winDiff > 0 && <> with {winDiff.toFixed(1)}% higher win rate too</>}
-            .
+            .{isExact ? ' (exact calculation)' : ''}
           </>
         ) : (
-          <>Both paths have similar expected value.</>
+          <>Both paths have similar expected value.{isExact ? ' (exact calculation)' : ''}</>
         )}
       </div>
     </div>

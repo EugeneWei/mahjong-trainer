@@ -1,11 +1,11 @@
-// React hook for running Monte Carlo analysis in a Web Worker
+// React hook for running hybrid (exact + Monte Carlo) analysis in a Web Worker
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as Comlink from 'comlink';
 import type { TileCounts } from '../engine/tiles';
 import type { GameContext } from '../engine/hand';
 import type { RulesetMode } from '../engine/rulesets';
-import type { MonteCarloResult, MonteCarloProgress } from '../engine/montecarlo';
+import type { MonteCarloResult, MonteCarloProgress, AnalysisMethod } from '../engine/montecarlo';
 import type { MonteCarloWorkerAPI } from '../workers/montecarlo.worker';
 
 interface UseMonteCarloResult {
@@ -13,6 +13,8 @@ interface UseMonteCarloResult {
   progress: number; // 0-1
   isRunning: boolean;
   error: string | null;
+  method: AnalysisMethod | null;
+  shanten: number | null;
   run: () => void;
 }
 
@@ -27,6 +29,8 @@ export function useMonteCarloAnalysis(
   const [progress, setProgress] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [method, setMethod] = useState<AnalysisMethod | null>(null);
+  const [shanten, setShanten] = useState<number | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const apiRef = useRef<Comlink.Remote<MonteCarloWorkerAPI> | null>(null);
@@ -60,6 +64,8 @@ export function useMonteCarloAnalysis(
     setProgress(0);
     setResults(null);
     setError(null);
+    setMethod(null);
+    setShanten(null);
 
     try {
       // Create fresh worker
@@ -84,10 +90,12 @@ export function useMonteCarloAnalysis(
         }
       });
 
-      const result = await api.runSimulation(request, progressCallback);
+      const hybridResult = await api.runHybrid(request, progressCallback);
 
       if (!cancelledRef.current) {
-        setResults(result);
+        setResults(hybridResult.results);
+        setMethod(hybridResult.method);
+        setShanten(hybridResult.shanten);
         setProgress(1);
       }
     } catch (err) {
@@ -112,5 +120,5 @@ export function useMonteCarloAnalysis(
     }
   }, [autoRun, tiles, gameContext, rulesetMode, run]);
 
-  return { results, progress, isRunning, error, run };
+  return { results, progress, isRunning, error, method, shanten, run };
 }

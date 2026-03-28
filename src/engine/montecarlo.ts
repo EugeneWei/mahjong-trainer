@@ -13,10 +13,15 @@ import {
 } from './tiles';
 import type { GameContext } from './hand';
 import { calculateShanten } from './shanten';
-import { scoreHand } from './scoring';
+import { scoreHand, isWinningHand } from './scoring';
 import type { RulesetMode } from './rulesets';
 import { getRulesetConfig } from './rulesets';
+import { getAcceptanceTiles } from './shanten';
 import { SeededRNG } from './generator';
+
+export type AnalysisMethod =
+  | { type: 'exact'; label: string }
+  | { type: 'montecarlo'; simulations: number; label: string };
 
 export interface MonteCarloResult {
   tile: TileIndex;
@@ -26,6 +31,12 @@ export interface MonteCarloResult {
   avgPayout: number; // EV — the key metric
   fanDistribution: Record<number, number>;
   bestHandSeen: { fan: number; patterns: string[] } | null;
+}
+
+export interface HybridAnalysisResult {
+  results: MonteCarloResult[];
+  method: AnalysisMethod;
+  shanten: number;
 }
 
 export interface MonteCarloProgress {
@@ -264,4 +275,374 @@ export function runMonteCarloAnalysis(
   results.sort((a, b) => b.avgPayout - a.avgPayout);
 
   return results;
+}
+
+// ---- Exact Tenpai Analysis (shanten 0) ----
+// For each discard from a 14-tile tenpai hand, enumerate all winning tiles
+// and calculate exact EV.
+
+export function exactTenpaiAnalysis(
+  tiles: TileCounts,
+  ctx: GameContext,
+  mode: RulesetMode,
+): MonteCarloResult[] {
+  const config = getRulesetConfig(mode);
+  const includeSevenPairs = config.sevenPairsEnabled;
+  const results: MonteCarloResult[] = [];
+
+  // Find unique discard options
+  for (let d = 0; d < NUM_TILE_TYPES; d++) {
+    if (tiles[d] <= 0) continue;
+
+    // Discard tile d -> 13-tile hand
+    tiles[d]--;
+    const sh = calculateShanten(tiles, includeSevenPairs);
+
+    if (sh === 0) {
+      // This 13-tile hand is tenpai — enumerate winning tiles
+      let totalWinProb = 0;
+      let weightedFan = 0;
+      let weightedPayout = 0;
+      const fanDist: Record<number, number> = {};
+      let bestFan = 0;
+      let bestPatterns: string[] = [];
+
+      for (let w = 0; w < NUM_TILE_TYPES; w++) {
+        const copiesRemaining = TILES_PER_TYPE - tiles[w] - (w === d ? 1 : 0);
+        if (copiesRemaining <= 0) continue;
+
+        // Try adding this tile as the winning tile
+        tiles[w]++;
+        if (isWinningHand(tiles, mode)) {
+          const winCtx: GameContext = { ...ctx, isSelfDrawn: true };
+          const score = scoreHand(tiles, winCtx, mode);
+          if (score) {
+            const fan = score.fan;
+            const payout = calculatePayout(fan, mode);
+            if (payout > 0) {
+              const prob = copiesRemaining / Math.max(ctx.wallRemaining, 1);
+              totalWinProb += prob;
+              weightedFan += prob * fan;
+              weightedPayout += prob * payout;
+              fanDist[fan] = (fanDist[fan] || 0) + copiesRemaining;
+              if (fan > bestFan) {
+                bestFan = fan;
+                bestPatterns = score.patterns;
+              }
+            }
+          }
+        }
+        tiles[w]--;
+      }
+
+      results.push({
+        tile: d,
+        simulations: 0, // exact
+        winRate: Math.min(totalWinProb, 1),
+        avgFan: totalWinProb > 0 ? weightedFan / totalWinProb : 0,
+        avgPayout: weightedPayout,
+        fanDistribution: fanDist,
+        bestHandSeen: bestFan > 0 ? { fan: bestFan, patterns: bestPatterns } : null,
+      });
+    } else if (sh === -1) {
+      // Already a complete hand after discard (shouldn't happen with 13 tiles, but handle it)
+      const score = scoreHand(tiles, { ...ctx, isSelfDrawn: true }, mode);
+      if (score) {
+        const payout = calculatePayout(score.fan, mode);
+        results.push({
+          tile: d,
+          simulations: 0,
+          winRate: 1,
+          avgFan: score.fan,
+          avgPayout: payout,
+          fanDistribution: { [score.fan]: 1 },
+          bestHandSeen: { fan: score.fan, patterns: score.patterns },
+        });
+      } else {
+        results.push({
+          tile: d,
+          simulations: 0,
+          winRate: 0,
+          avgFan: 0,
+          avgPayout: 0,
+          fanDistribution: {},
+          bestHandSeen: null,
+        });
+      }
+    } else {
+      // Discard makes hand worse than tenpai — still include with zero EV
+      results.push({
+        tile: d,
+        simulations: 0,
+        winRate: 0,
+        avgFan: 0,
+        avgPayout: 0,
+        fanDistribution: {},
+        bestHandSeen: null,
+      });
+    }
+
+    tiles[d]++;
+  }
+
+  results.sort((a, b) => b.avgPayout - a.avgPayout);
+  return results;
+}
+
+// ---- Exact Iishanten Analysis (shanten 1) ----
+// For each discard, do exhaustive 2-ply: try all draws, score tenpai/win states.
+
+export function exactIishantenAnalysis(
+  tiles: TileCounts,
+  ctx: GameContext,
+  mode: RulesetMode,
+): MonteCarloResult[] {
+  const config = getRulesetConfig(mode);
+  const includeSevenPairs = config.sevenPairsEnabled;
+  const results: MonteCarloResult[] = [];
+
+  const wallRemaining = Math.max(ctx.wallRemaining, 1);
+
+  for (let d = 0; d < NUM_TILE_TYPES; d++) {
+    if (tiles[d] <= 0) continue;
+
+    // Discard tile d -> 13-tile hand
+    tiles[d]--;
+
+    let totalWeightedPayout = 0;
+    let totalWeightedFan = 0;
+    let totalWinWeight = 0;
+    let totalWeight = 0;
+    const fanDist: Record<number, number> = {};
+    let bestFan = 0;
+    let bestPatterns: string[] = [];
+
+    // For each possible draw from the wall
+    for (let draw = 0; draw < NUM_TILE_TYPES; draw++) {
+      const copiesAvail = TILES_PER_TYPE - tiles[draw];
+      if (copiesAvail <= 0) continue;
+
+      const drawProb = copiesAvail / wallRemaining;
+      totalWeight += drawProb;
+
+      // Add the draw -> 14-tile hand
+      tiles[draw]++;
+
+      const sh = calculateShanten(tiles, includeSevenPairs);
+
+      if (sh === -1) {
+        // Complete hand! Score it directly.
+        const winCtx: GameContext = { ...ctx, isSelfDrawn: true, wallRemaining: wallRemaining - 1 };
+        const score = scoreHand(tiles, winCtx, mode);
+        if (score) {
+          const payout = calculatePayout(score.fan, mode);
+          if (payout > 0) {
+            totalWinWeight += drawProb;
+            totalWeightedFan += drawProb * score.fan;
+            totalWeightedPayout += drawProb * payout;
+            fanDist[score.fan] = (fanDist[score.fan] || 0) + copiesAvail;
+            if (score.fan > bestFan) {
+              bestFan = score.fan;
+              bestPatterns = score.patterns;
+            }
+          }
+        }
+      } else if (sh === 0) {
+        // Tenpai! Find the best discard to maximize winning tiles,
+        // then estimate probability of completing.
+        const tenpaiResult = evaluateTenpaiAfterDraw(tiles, draw, ctx, mode, includeSevenPairs, wallRemaining - 1);
+        if (tenpaiResult.payout > 0) {
+          const combinedProb = drawProb * tenpaiResult.winProb;
+          totalWinWeight += combinedProb;
+          totalWeightedFan += combinedProb * tenpaiResult.avgFan;
+          totalWeightedPayout += drawProb * tenpaiResult.payout; // payout already accounts for winProb
+          // Merge fan distribution (weighted by copies available)
+          for (const [fan, count] of Object.entries(tenpaiResult.fanDist)) {
+            const f = Number(fan);
+            fanDist[f] = (fanDist[f] || 0) + count;
+          }
+          if (tenpaiResult.bestFan > bestFan) {
+            bestFan = tenpaiResult.bestFan;
+            bestPatterns = tenpaiResult.bestPatterns;
+          }
+        }
+      }
+      // sh >= 1: still far from winning in 2 draws, skip
+
+      tiles[draw]--;
+    }
+
+    results.push({
+      tile: d,
+      simulations: 0, // exact
+      winRate: Math.min(totalWinWeight, 1),
+      avgFan: totalWinWeight > 0 ? totalWeightedFan / totalWinWeight : 0,
+      avgPayout: totalWeightedPayout,
+      fanDistribution: fanDist,
+      bestHandSeen: bestFan > 0 ? { fan: bestFan, patterns: bestPatterns } : null,
+    });
+
+    tiles[d]++;
+  }
+
+  results.sort((a, b) => b.avgPayout - a.avgPayout);
+  return results;
+}
+
+// Helper: given a 14-tile tenpai hand (after drawing), find the best discard
+// that maximizes EV from the resulting tenpai wait, then estimate win probability.
+function evaluateTenpaiAfterDraw(
+  tiles: TileCounts,
+  _drawnTile: number,
+  ctx: GameContext,
+  mode: RulesetMode,
+  includeSevenPairs: boolean,
+  wallAfterDraw: number,
+): { winProb: number; payout: number; avgFan: number; fanDist: Record<number, number>; bestFan: number; bestPatterns: string[] } {
+  let bestPayout = 0;
+  let bestResult = {
+    winProb: 0,
+    payout: 0,
+    avgFan: 0,
+    fanDist: {} as Record<number, number>,
+    bestFan: 0,
+    bestPatterns: [] as string[],
+  };
+
+  // Try each discard from the 14-tile hand to find the best tenpai discard
+  for (let disc = 0; disc < NUM_TILE_TYPES; disc++) {
+    if (tiles[disc] <= 0) continue;
+
+    tiles[disc]--;
+    const sh = calculateShanten(tiles, includeSevenPairs);
+
+    if (sh === 0) {
+      // This discard leaves us tenpai — enumerate winning tiles
+      let winProb = 0;
+      let weightedPayout = 0;
+      let weightedFan = 0;
+      const fanDist: Record<number, number> = {};
+      let bFan = 0;
+      let bPatterns: string[] = [];
+
+      for (let w = 0; w < NUM_TILE_TYPES; w++) {
+        const copies = TILES_PER_TYPE - tiles[w] - (w === disc ? 1 : 0);
+        if (copies <= 0) continue;
+
+        tiles[w]++;
+        if (isWinningHand(tiles, mode)) {
+          const score = scoreHand(tiles, { ...ctx, isSelfDrawn: true, wallRemaining: wallAfterDraw - 1 }, mode);
+          if (score) {
+            const payout = calculatePayout(score.fan, mode);
+            if (payout > 0) {
+              // Probability of drawing this winning tile in remaining turns
+              // Approximate: P = 1 - (1 - copies/wall)^(turnsRemaining/2)
+              // Use half the remaining wall as a rough estimate of draws available
+              const turnsRemaining = Math.max(Math.floor(wallAfterDraw / 2), 1);
+              const pDraw = 1 - Math.pow(1 - copies / Math.max(wallAfterDraw, 1), turnsRemaining);
+              winProb += pDraw;
+              weightedPayout += pDraw * payout;
+              weightedFan += pDraw * score.fan;
+              fanDist[score.fan] = (fanDist[score.fan] || 0) + copies;
+              if (score.fan > bFan) {
+                bFan = score.fan;
+                bPatterns = score.patterns;
+              }
+            }
+          }
+        }
+        tiles[w]--;
+      }
+
+      winProb = Math.min(winProb, 1);
+      if (weightedPayout > bestPayout) {
+        bestPayout = weightedPayout;
+        bestResult = {
+          winProb,
+          payout: weightedPayout,
+          avgFan: winProb > 0 ? weightedFan / winProb : 0,
+          fanDist,
+          bestFan: bFan,
+          bestPatterns: bPatterns,
+        };
+      }
+    }
+
+    tiles[disc]++;
+  }
+
+  return bestResult;
+}
+
+// ---- Hybrid Analysis Entry Point ----
+// Routes to exact or Monte Carlo analysis based on shanten.
+
+export function runHybridAnalysis(
+  request: MonteCarloRequest,
+  onProgress?: (progress: MonteCarloProgress) => void,
+): HybridAnalysisResult {
+  const { tiles, gameContext, rulesetMode } = request;
+  const config = getRulesetConfig(rulesetMode);
+  const includeSevenPairs = config.sevenPairsEnabled;
+
+  const shanten = calculateShanten(tiles, includeSevenPairs);
+
+  if (shanten === -1) {
+    // Hand is already complete — just score it
+    const score = scoreHand(tiles, { ...gameContext, isSelfDrawn: true }, rulesetMode);
+    const payout = score ? calculatePayout(score.fan, rulesetMode) : 0;
+    // No discard needed; return empty results since the hand is won
+    return {
+      results: [],
+      method: { type: 'exact', label: 'Complete hand' },
+      shanten: -1,
+    };
+  }
+
+  if (shanten === 0) {
+    // Tenpai — use exact enumeration
+    if (onProgress) {
+      onProgress({ completed: 0, total: 1, partialResults: [] });
+    }
+    const results = exactTenpaiAnalysis(tiles, gameContext, rulesetMode);
+    if (onProgress) {
+      onProgress({ completed: 1, total: 1, partialResults: results });
+    }
+    return {
+      results,
+      method: { type: 'exact', label: 'Exact tenpai analysis' },
+      shanten: 0,
+    };
+  }
+
+  if (shanten === 1) {
+    // Iishanten — use exhaustive 2-ply search
+    if (onProgress) {
+      onProgress({ completed: 0, total: 1, partialResults: [] });
+    }
+    const results = exactIishantenAnalysis(tiles, gameContext, rulesetMode);
+    if (onProgress) {
+      onProgress({ completed: 1, total: 1, partialResults: results });
+    }
+    return {
+      results,
+      method: { type: 'exact', label: 'Exact 2-ply iishanten analysis' },
+      shanten: 1,
+    };
+  }
+
+  // Shanten 2-3: Monte Carlo with full sims
+  // Shanten 4+: Monte Carlo with fewer sims
+  const numSims = shanten <= 3 ? 500 : 200;
+  const adjustedRequest = { ...request, numSimulations: numSims };
+  const results = runMonteCarloAnalysis(adjustedRequest, onProgress);
+  return {
+    results,
+    method: {
+      type: 'montecarlo',
+      simulations: numSims,
+      label: `Monte Carlo (${numSims} sims)`,
+    },
+    shanten,
+  };
 }

@@ -75,6 +75,8 @@ export default function QuizMode({ rulesetMode }: QuizModeProps) {
     progress: mcProgress,
     isRunning: mcRunning,
     error: mcError,
+    method: mcMethod,
+    shanten: mcShanten,
     run: runMC,
   } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 500, true);
 
@@ -195,6 +197,8 @@ export default function QuizMode({ rulesetMode }: QuizModeProps) {
                 isRunning={mcRunning}
                 error={mcError}
                 rulesetMode={rulesetMode}
+                method={mcMethod}
+                shanten={mcShanten}
                 onRun={runMC}
               />
 

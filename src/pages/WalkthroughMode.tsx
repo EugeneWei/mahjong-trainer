@@ -129,6 +129,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
     progress: mcProgress,
     isRunning: mcRunning,
     error: mcError,
+    method: mcMethod,
+    shanten: mcShanten,
     run: runMC,
   } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 300, false);
 
@@ -255,6 +257,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
               isRunning={mcRunning}
               error={mcError}
               rulesetMode={rulesetMode}
+              method={mcMethod}
+              shanten={mcShanten}
               onRun={runMC}
             />
           )}

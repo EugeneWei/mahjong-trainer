@@ -40,6 +40,8 @@ export default function FreeAnalysis({ rulesetMode }: FreeAnalysisProps) {
     progress: mcProgress,
     isRunning: mcRunning,
     error: mcError,
+    method: mcMethod,
+    shanten: mcShanten,
     run: runMC,
   } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 500, true);
 
@@ -175,6 +177,8 @@ export default function FreeAnalysis({ rulesetMode }: FreeAnalysisProps) {
           isRunning={mcRunning}
           error={mcError}
           rulesetMode={rulesetMode}
+          method={mcMethod}
+          shanten={mcShanten}
           onRun={runMC}
         />
       )}
