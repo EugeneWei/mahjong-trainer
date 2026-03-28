@@ -60,6 +60,7 @@ export interface AnalysisResult {
   handAnalysis: string;
   winningPaths: HandPath[];
   tileGroups: TileGroup[]; // detected melds, partials, pairs, isolated tiles
+  monteCarloResults?: import('./montecarlo').MonteCarloResult[]; // optional, populated async
 }
 
 const SUIT_NAMES = ['Bamboo', 'Characters', 'Dots'];

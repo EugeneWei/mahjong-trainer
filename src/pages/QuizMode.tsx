@@ -1,8 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import TileRow from '../components/tiles/TileRow';
 import TileSVG from '../components/tiles/TileSVG';
 import GameContextPanel from '../components/input/GameContext';
 import AnalysisPanel from '../components/analysis/AnalysisPanel';
+import MonteCarloPanel from '../components/analysis/MonteCarloPanel';
 import {
   cloneTileCounts,
   type TileIndex,
@@ -13,6 +14,7 @@ import { generateHandForPhase, type GamePhase } from '../engine/generator';
 import type { AnalysisResult } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
 import GlossaryLinkedText from '../components/shared/GlossaryLinkedText';
+import { useMonteCarloAnalysis } from '../hooks/useMonteCarloAnalysis';
 
 interface QuizModeProps {
   rulesetMode: RulesetMode;
@@ -58,6 +60,23 @@ export default function QuizMode({ rulesetMode }: QuizModeProps) {
       isCorrect: false,
     });
   }, [phase, rulesetMode]);
+
+  // Monte Carlo — runs only after answer is revealed
+  const mcTiles = useMemo(
+    () => (quiz?.answered ? quiz.tiles : null),
+    [quiz?.answered, quiz?.tiles],
+  );
+  const mcCtx = useMemo(
+    () => (quiz?.answered ? quiz.gameCtx : null),
+    [quiz?.answered, quiz?.gameCtx],
+  );
+  const {
+    results: mcResults,
+    progress: mcProgress,
+    isRunning: mcRunning,
+    error: mcError,
+    run: runMC,
+  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 500, true);
 
   const handleDiscard = (tile: TileIndex) => {
     if (!quiz || quiz.answered) return;
@@ -169,6 +188,15 @@ export default function QuizMode({ rulesetMode }: QuizModeProps) {
               </div>
 
               <AnalysisPanel result={quiz.analysis} showTopN={3} showPaths={false} />
+
+              <MonteCarloPanel
+                results={mcResults}
+                progress={mcProgress}
+                isRunning={mcRunning}
+                error={mcError}
+                rulesetMode={rulesetMode}
+                onRun={runMC}
+              />
 
               <button
                 onClick={generateQuiz}

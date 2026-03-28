@@ -1,9 +1,10 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import TileRow from '../components/tiles/TileRow';
 import TilePicker from '../components/tiles/TilePicker';
 import ShorthandField from '../components/input/ShorthandField';
 import GameContextPanel from '../components/input/GameContext';
 import AnalysisPanel from '../components/analysis/AnalysisPanel';
+import MonteCarloPanel from '../components/analysis/MonteCarloPanel';
 import {
   createEmptyTileCounts,
   totalTileCount,
@@ -16,6 +17,7 @@ import { generateRandomHand } from '../engine/generator';
 import type { AnalysisResult } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
 import GlossaryLinkedText from '../components/shared/GlossaryLinkedText';
+import { useMonteCarloAnalysis } from '../hooks/useMonteCarloAnalysis';
 
 interface FreeAnalysisProps {
   rulesetMode: RulesetMode;
@@ -29,6 +31,17 @@ export default function FreeAnalysis({ rulesetMode }: FreeAnalysisProps) {
   const [inputMode, setInputMode] = useState<'picker' | 'text'>('picker');
 
   const count = totalTileCount(tiles);
+
+  // Monte Carlo hook — only active when we have a 14-tile hand
+  const mcTiles = useMemo(() => (count === 14 ? tiles : null), [tiles, count]);
+  const mcCtx = useMemo(() => (count === 14 ? gameCtx : null), [gameCtx, count]);
+  const {
+    results: mcResults,
+    progress: mcProgress,
+    isRunning: mcRunning,
+    error: mcError,
+    run: runMC,
+  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 500, true);
 
   const runAnalysis = useCallback(
     (hand: TileCounts, ctx: GameContext) => {
@@ -153,6 +166,18 @@ export default function FreeAnalysis({ rulesetMode }: FreeAnalysisProps) {
 
       {/* Full analysis for 14-tile hands */}
       {analysis && <AnalysisPanel result={analysis} />}
+
+      {/* Monte Carlo simulation */}
+      {count === 14 && (
+        <MonteCarloPanel
+          results={mcResults}
+          progress={mcProgress}
+          isRunning={mcRunning}
+          error={mcError}
+          rulesetMode={rulesetMode}
+          onRun={runMC}
+        />
+      )}
 
       {/* Suit legend */}
       <div className="bg-slate-800/30 rounded-lg p-3">

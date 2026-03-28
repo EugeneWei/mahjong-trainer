@@ -1,11 +1,13 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import TileRow from '../components/tiles/TileRow';
 import TileSVG from '../components/tiles/TileSVG';
 import GameContextPanel from '../components/input/GameContext';
 import AnalysisPanel from '../components/analysis/AnalysisPanel';
+import MonteCarloPanel from '../components/analysis/MonteCarloPanel';
 import {
   cloneTileCounts,
   TILES_PER_TYPE,
+  totalTileCount,
   type TileCounts,
 } from '../engine/tiles';
 import { createDefaultGameContext, type GameContext } from '../engine/hand';
@@ -16,6 +18,7 @@ import type { AnalysisResult } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
 import { getRulesetConfig } from '../engine/rulesets';
 import GlossaryLinkedText from '../components/shared/GlossaryLinkedText';
+import { useMonteCarloAnalysis } from '../hooks/useMonteCarloAnalysis';
 
 interface WalkthroughModeProps {
   rulesetMode: RulesetMode;
@@ -111,6 +114,23 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
   }, [phase, rulesetMode, config.sevenPairsEnabled]);
 
   const turn = turns[currentTurn];
+
+  // Monte Carlo for current turn (if it has a 14-tile hand with analysis)
+  const mcTiles = useMemo(
+    () => (turn && turn.analysis && totalTileCount(turn.tiles) === 14 ? turn.tiles : null),
+    [turn],
+  );
+  const mcCtx = useMemo(
+    () => (turn && turn.analysis ? { ...createDefaultGameContext(), wallRemaining: turn.wallRemaining } : null),
+    [turn],
+  );
+  const {
+    results: mcResults,
+    progress: mcProgress,
+    isRunning: mcRunning,
+    error: mcError,
+    run: runMC,
+  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 300, false);
 
   return (
     <div className="p-4 space-y-4 pb-24">
@@ -226,6 +246,18 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
 
           {/* Full analysis */}
           {turn.analysis && <AnalysisPanel result={turn.analysis} showTopN={3} showPaths={false} />}
+
+          {/* Monte Carlo */}
+          {turn.analysis && totalTileCount(turn.tiles) === 14 && (
+            <MonteCarloPanel
+              results={mcResults}
+              progress={mcProgress}
+              isRunning={mcRunning}
+              error={mcError}
+              rulesetMode={rulesetMode}
+              onRun={runMC}
+            />
+          )}
         </>
       )}
     </div>
