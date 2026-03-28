@@ -10,6 +10,7 @@ import {
   TILES_PER_TYPE,
   cloneTileCounts,
   WINDS_START,
+  DRAGONS_START,
 } from './tiles';
 import type { GameContext } from './hand';
 import { calculateShanten } from './shanten';
@@ -66,14 +67,15 @@ function calculatePayout(fan: number, mode: RulesetMode): number {
   return BASE_POINTS * Math.pow(2, fan - 3);
 }
 
-// ---- Ultra-fast discard heuristic for inside simulations ----
-// Only uses shanten (no acceptance calculation). Ties broken by simple
-// connectivity heuristic to avoid the expensive getAcceptanceTiles call.
+// ---- Score-aware discard heuristic for inside simulations ----
+// Primary: minimize shanten (non-negotiable)
+// Secondary: maximize hand potential score — preserves paths to higher-scoring hands
+// This biases simulations toward flush, pong, honor, and other high-value patterns.
 
-function fastPickDiscard(tiles: TileCounts, includeSevenPairs: boolean): TileIndex {
+function fastPickDiscard(tiles: TileCounts, includeSevenPairs: boolean, ctx?: GameContext): TileIndex {
   let bestTile = -1;
   let bestShanten = 99;
-  let bestScore = -999;
+  let bestPotential = -999;
 
   for (let i = 0; i < NUM_TILE_TYPES; i++) {
     if (tiles[i] <= 0) continue;
@@ -81,14 +83,12 @@ function fastPickDiscard(tiles: TileCounts, includeSevenPairs: boolean): TileInd
     const sh = calculateShanten(tiles, includeSevenPairs);
     if (sh < bestShanten) {
       bestShanten = sh;
-      bestScore = tileConnectivity(tiles, i);
+      bestPotential = handPotential(tiles, ctx);
       bestTile = i;
     } else if (sh === bestShanten) {
-      // Tie-break: prefer discarding less-connected tiles
-      // (tiles with fewer neighbors / lower connectivity keep better tiles)
-      const score = tileConnectivity(tiles, i);
-      if (score > bestScore) {
-        bestScore = score;
+      const potential = handPotential(tiles, ctx);
+      if (potential > bestPotential) {
+        bestPotential = potential;
         bestTile = i;
       }
     }
@@ -98,14 +98,103 @@ function fastPickDiscard(tiles: TileCounts, includeSevenPairs: boolean): TileInd
   return bestTile >= 0 ? bestTile : 0;
 }
 
-// Quick connectivity score for tie-breaking (higher = worse tile to keep = better to discard)
-// Negative of how connected the discarded tile is to the remaining hand
-function tileConnectivity(_tiles: TileCounts, discardedTile: TileIndex): number {
-  // Isolated honors and terminals are best to discard (high score)
-  if (discardedTile >= WINDS_START) return 10; // honor
-  const rank = discardedTile % 9;
-  if (rank === 0 || rank === 8) return 5; // terminal
-  return 0; // middle tile (worse to discard)
+// Evaluate the scoring potential of a 13-tile hand (after discarding).
+// Higher = more likely to lead to a high-scoring win.
+// This is designed to be fast: one scan of the 34-element array, no recursion.
+function handPotential(tiles: TileCounts, ctx?: GameContext): number {
+  let score = 0;
+
+  // --- Suit concentration (flush potential) ---
+  // Full Flush (7 fan) and Half Flush (3 fan) are huge; reward concentration.
+  const suitCounts = [0, 0, 0];
+  let honorCount = 0;
+  for (let i = 0; i < 27; i++) {
+    suitCounts[Math.floor(i / 9)] += tiles[i];
+  }
+  for (let i = WINDS_START; i < NUM_TILE_TYPES; i++) {
+    honorCount += tiles[i];
+  }
+
+  const totalSuitTiles = suitCounts[0] + suitCounts[1] + suitCounts[2];
+  const maxSuit = Math.max(suitCounts[0], suitCounts[1], suitCounts[2]);
+
+  if (totalSuitTiles > 0) {
+    const concentration = maxSuit / (totalSuitTiles + honorCount);
+    // concentration of 1.0 = pure flush, 0.33 = evenly split
+    // Scale: 0.5 concentration = 0 bonus, 1.0 = 40 bonus
+    if (concentration > 0.5) {
+      score += (concentration - 0.5) * 80; // 0 to 40 points
+
+      // Extra bonus for near-flush hands (very strong signal)
+      if (maxSuit >= 10 && honorCount === 0) score += 15; // near Full Flush
+      else if (maxSuit >= 10) score += 8; // near Half Flush
+    }
+  }
+
+  // --- Honor value (Dragon and scoring Wind pongs) ---
+  // Each Dragon pong = 1 fan, each scoring Wind pong = 1 fan
+  const seatWind = ctx?.seatWind ?? 0;
+  const prevWind = ctx?.prevailingWind ?? 0;
+
+  for (let i = DRAGONS_START; i < NUM_TILE_TYPES; i++) {
+    if (tiles[i] >= 3) score += 12;      // Dragon pong: guaranteed 1 fan
+    else if (tiles[i] === 2) score += 6;  // Dragon pair: could become pong
+  }
+
+  const seatWindIdx = WINDS_START + seatWind;
+  const prevWindIdx = WINDS_START + prevWind;
+  for (let i = WINDS_START; i < DRAGONS_START; i++) {
+    const isScoring = (i === seatWindIdx || i === prevWindIdx);
+    if (tiles[i] >= 3 && isScoring) score += 12;      // Scoring wind pong
+    else if (tiles[i] === 2 && isScoring) score += 6;  // Scoring wind pair
+    else if (tiles[i] >= 3) score += 3;                // Non-scoring wind pong (still a meld)
+    else if (tiles[i] === 1 && !isScoring) score -= 2; // Isolated non-scoring wind: dead tile
+  }
+
+  // --- All Pongs potential ---
+  // All Pongs (3 fan) requires 4 pongs + pair. Reward triplet-heavy hands.
+  let triplets = 0;
+  let pairs = 0;
+  for (let i = 0; i < NUM_TILE_TYPES; i++) {
+    if (tiles[i] >= 3) triplets++;
+    else if (tiles[i] === 2) pairs++;
+  }
+  if (triplets >= 2) score += triplets * 5; // Pong path viable
+  if (triplets >= 3) score += 10;           // Strong pong path
+
+  // --- Hand shape / connectivity ---
+  // Reward tiles that form sequences (connected tiles)
+  // Penalize isolated tiles
+  for (let s = 0; s < 3; s++) {
+    const start = s * 9;
+    for (let r = 0; r < 9; r++) {
+      const idx = start + r;
+      if (tiles[idx] === 0) continue;
+
+      // Check if this tile connects to neighbors
+      const hasLeft = r > 0 && tiles[idx - 1] > 0;
+      const hasRight = r < 8 && tiles[idx + 1] > 0;
+      const hasGapLeft = r > 1 && tiles[idx - 2] > 0;
+      const hasGapRight = r < 7 && tiles[idx + 2] > 0;
+
+      if (hasLeft && hasRight) score += 3;        // Connected both sides
+      else if (hasLeft || hasRight) score += 1.5;  // Connected one side
+      else if (hasGapLeft || hasGapRight) score += 0.5; // Gap connection
+      else if (tiles[idx] === 1) score -= 2;      // Isolated single: dead weight
+
+      // Terminal penalty (less flexible for sequences)
+      if (r === 0 || r === 8) {
+        if (tiles[idx] === 1 && !hasRight && !hasLeft) score -= 1;
+      }
+    }
+  }
+
+  // --- Seven Pairs potential (if enabled) ---
+  if (pairs + triplets >= 5) {
+    score += 5; // Many pairs = Seven Pairs could be viable
+  }
+
+  return score;
 }
 
 // ---- Build remaining wall (tiles not in hand) ----
@@ -172,8 +261,8 @@ function runOneSim(
       continue;
     }
 
-    // Pick best discard using fast heuristic
-    const discard = fastPickDiscard(tiles, includeSevenPairs);
+    // Pick best discard using score-aware heuristic
+    const discard = fastPickDiscard(tiles, includeSevenPairs, ctx);
     tiles[discard]--;
   }
 
