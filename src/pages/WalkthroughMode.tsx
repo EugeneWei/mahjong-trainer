@@ -42,6 +42,7 @@ interface WalkthroughState {
   phase: WalkthroughPhase;
   message: string;
   humanAnalysis: AnalysisResult | null;
+  selectedTile: TileIndex | null;  // two-step discard: selected but not yet confirmed
 }
 
 export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
@@ -65,6 +66,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         phase: 'game-over',
         message: 'Wall is empty.',
         humanAnalysis: null,
+        selectedTile: null,
       });
       return;
     }
@@ -77,6 +79,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         phase: 'game-over',
         message: `You drew ${tileFullName(humanTurn.drawnTile)} and won on your first draw! Tsumo!`,
         humanAnalysis: null,
+        selectedTile: null,
       });
       return;
     }
@@ -86,16 +89,27 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       allTurns: [humanTurn],
       currentHumanTurn: humanTurn,
       phase: 'human-turn',
-      message: `You drew ${tileFullName(humanTurn.drawnTile)}. Choose a tile to discard.`,
+      message: `You drew ${tileFullName(humanTurn.drawnTile)}. Click on a tile to discard it.`,
       humanAnalysis: humanTurn.analysis ?? null,
+      selectedTile: null,
     });
     setViewTurnIndex(-1);
   }, [rulesetMode]);
 
-  // Human discards a tile
-  const handleDiscard = useCallback((tile: TileIndex) => {
-    if (!state || state.phase !== 'human-turn' || !state.currentHumanTurn) return;
+  // Step 1: Select a tile (highlight it, show confirm button)
+  const handleTileSelect = useCallback((tile: TileIndex) => {
+    if (!state || state.phase !== 'human-turn') return;
+    setState({
+      ...state,
+      selectedTile: state.selectedTile === tile ? null : tile, // toggle
+    });
+  }, [state]);
 
+  // Step 2: Confirm the discard
+  const handleConfirmDiscard = useCallback(() => {
+    if (!state || state.phase !== 'human-turn' || !state.currentHumanTurn || state.selectedTile === null) return;
+
+    const tile = state.selectedTile;
     const gameState = state.gameState;
 
     // Execute the discard
@@ -124,6 +138,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         phase: 'game-over',
         message: `Player ${aiWinner.player} (${['East', 'South', 'West', 'North'][gameState.players[aiWinner.player].seatWind]}) won!`,
         humanAnalysis: null,
+        selectedTile: null,
       });
       return;
     }
@@ -137,6 +152,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         phase: 'game-over',
         message: 'Wall is empty. Draw game.',
         humanAnalysis: null,
+        selectedTile: null,
       });
       return;
     }
@@ -154,6 +170,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       phase: 'between-turns',
       message: `You discarded ${tileFullName(tile)}. ${aiDiscardMessages.join('. ')}.`,
       humanAnalysis: null,
+      selectedTile: null,
     });
   }, [state, rulesetMode]);
 
@@ -170,6 +187,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         phase: 'game-over',
         message: 'Wall is empty. Draw game.',
         humanAnalysis: null,
+        selectedTile: null,
       });
       return;
     }
@@ -182,6 +200,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         phase: 'game-over',
         message: `You drew ${tileFullName(humanTurn.drawnTile)} and won! Tsumo!`,
         humanAnalysis: null,
+        selectedTile: null,
       });
       return;
     }
@@ -191,8 +210,9 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       allTurns: [...state.allTurns, humanTurn],
       currentHumanTurn: humanTurn,
       phase: 'human-turn',
-      message: `You drew ${tileFullName(humanTurn.drawnTile)}. Choose a tile to discard.`,
+      message: `You drew ${tileFullName(humanTurn.drawnTile)}. Click on a tile to discard it.`,
       humanAnalysis: humanTurn.analysis ?? null,
+      selectedTile: null,
     });
   }, [state, rulesetMode]);
 
@@ -237,13 +257,15 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
 
       {state && (
         <>
-          {/* Message */}
-          <div className="bg-slate-800/60 rounded-lg p-3">
-            <GlossaryLinkedText
-              text={state.message}
-              className="text-sm text-slate-300 leading-relaxed"
-            />
-          </div>
+          {/* Status message (non-turn info) */}
+          {state.phase !== 'human-turn' && (
+            <div className="bg-slate-800/60 rounded-lg p-3">
+              <GlossaryLinkedText
+                text={state.message}
+                className="text-sm text-slate-300 leading-relaxed"
+              />
+            </div>
+          )}
 
           {/* Table View with all rivers and human's hand */}
           <TableView
@@ -258,12 +280,14 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
                 ? state.currentHumanTurn.drawnTile
                 : undefined
             }
+            selectedTile={state.selectedTile ?? undefined}
             dangerTiles={
               state.humanAnalysis
                 ? [state.humanAnalysis.bestDiscard]
                 : []
             }
-            onTileClick={state.phase === 'human-turn' ? handleDiscard : undefined}
+            onTileClick={state.phase === 'human-turn' ? handleTileSelect : undefined}
+            prompt={state.phase === 'human-turn' ? state.message : undefined}
           >
             {/* Center area: dead tile summary */}
             <div className="bg-slate-800/40 rounded-lg p-2 text-center">
@@ -281,6 +305,25 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
               </div>
             </div>
           </TableView>
+
+          {/* Confirm discard button (two-step process) */}
+          {state.phase === 'human-turn' && state.selectedTile !== null && (
+            <div className="flex gap-2">
+              <button
+                onClick={handleConfirmDiscard}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white py-3 rounded-lg text-sm font-bold flex items-center justify-center gap-2"
+              >
+                Discard {tileFullName(state.selectedTile)}
+                <TileSVG tile={state.selectedTile} size="sm" danger />
+              </button>
+              <button
+                onClick={() => setState({ ...state, selectedTile: null })}
+                className="bg-slate-700 hover:bg-slate-600 text-slate-300 py-3 px-4 rounded-lg text-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
 
           {/* Between turns: show AI actions and advance button */}
           {state.phase === 'between-turns' && (

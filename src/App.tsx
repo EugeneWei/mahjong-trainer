@@ -43,13 +43,23 @@ export default function App() {
         </div>
       </header>
 
-      {/* Page content */}
+      {/* Page content — all tabs stay mounted to preserve state */}
       <main className="flex-1 overflow-y-auto">
-        {tab === 'analyze' && <FreeAnalysis rulesetMode={rulesetMode} />}
-        {tab === 'quiz' && <QuizMode rulesetMode={rulesetMode} />}
-        {tab === 'walkthrough' && <WalkthroughMode rulesetMode={rulesetMode} />}
-        {tab === 'glossary' && <Glossary rulesetMode={rulesetMode} />}
-        {tab === 'stats' && <Stats />}
+        <div style={{ display: tab === 'analyze' ? 'block' : 'none' }}>
+          <FreeAnalysis rulesetMode={rulesetMode} />
+        </div>
+        <div style={{ display: tab === 'quiz' ? 'block' : 'none' }}>
+          <QuizMode rulesetMode={rulesetMode} />
+        </div>
+        <div style={{ display: tab === 'walkthrough' ? 'block' : 'none' }}>
+          <WalkthroughMode rulesetMode={rulesetMode} />
+        </div>
+        <div style={{ display: tab === 'glossary' ? 'block' : 'none' }}>
+          <Glossary rulesetMode={rulesetMode} />
+        </div>
+        <div style={{ display: tab === 'stats' ? 'block' : 'none' }}>
+          <Stats />
+        </div>
       </main>
 
       {/* Bottom navigation */}

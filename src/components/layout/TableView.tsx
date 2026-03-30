@@ -18,6 +18,7 @@ interface TableViewProps {
   dangerTiles?: TileIndex[];
   highlightedTiles?: TileIndex[];
   onTileClick?: (tile: TileIndex) => void;
+  prompt?: string; // action prompt shown prominently above the hand
   children?: React.ReactNode; // center area content
 }
 
@@ -29,6 +30,7 @@ export default function TableView({
   dangerTiles = [],
   highlightedTiles = [],
   onTileClick,
+  prompt,
   children,
 }: TableViewProps) {
   const wallRemaining = getWallRemaining(gameState);
@@ -103,6 +105,13 @@ export default function TableView({
           </div>
         </div>
       </div>
+
+      {/* Action prompt — prominent, right above the hand */}
+      {prompt && (
+        <div className="bg-blue-900/40 border border-blue-700/50 rounded-lg px-4 py-3 text-center">
+          <div className="text-base font-bold text-blue-200">{prompt}</div>
+        </div>
+      )}
 
       {/* Human's hand (large tiles at bottom) */}
       <div className="bg-slate-800/50 rounded-lg p-3">
