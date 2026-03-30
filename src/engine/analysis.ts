@@ -360,11 +360,23 @@ function generateHandAnalysis(
 }
 
 function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMode = 'hk'): HandPath[] {
-  const paths: HandPath[] = [];
+  const config = getRulesetConfig(_mode);
+  const shanten = calculateShanten(tiles, config.sevenPairsEnabled);
   const comp = analyzeComposition(tiles);
+  const paths: HandPath[] = [];
 
+  // --- Early game (shanten 4+): Focus on hand SHAPE and DIRECTION, not specific patterns ---
+  // At high shanten, the hand is too undeveloped for specific targets.
+  // Instead, describe the natural tendencies and which directions to steer.
+  if (shanten >= 4) {
+    return findEarlyGameDirections(tiles, comp, ctx, shanten);
+  }
+
+  // --- Mid/Late game (shanten 0-3): Show specific target hands ---
+
+  // Flush paths
   for (let s = 0; s < 3; s++) {
-    if (comp.suitCounts[s] >= 8) {
+    if (comp.suitCounts[s] >= 7) {
       let offSuitCount = 0;
       for (let i = 0; i < NUM_TILE_TYPES; i++) {
         if (tiles[i] > 0) {
@@ -372,38 +384,39 @@ function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMod
           if (tileSuit !== s) offSuitCount += tiles[i];
         }
       }
-      if (comp.honorCount > 0) {
+      if (comp.honorCount > 0 && comp.suitCounts[s] >= 8) {
         paths.push({
           name: 'Half Flush',
           fan: 3,
-          description: `Concentrate on ${SUIT_NAMES[s]} + Honors. Discard other suits. You have ${comp.suitCounts[s]} ${SUIT_NAMES[s]} tiles.`,
+          description: `${comp.suitCounts[s]} ${SUIT_NAMES[s]} tiles + honors. Discard other suits to complete.`,
           tilesNeeded: [],
           probability: 0.5,
         });
       }
-      const suitOnlyOff = offSuitCount;
-      if (suitOnlyOff <= 4) {
+      if (offSuitCount <= 5) {
         paths.push({
           name: 'Full Flush',
           fan: 7,
-          description: `Go all-in on ${SUIT_NAMES[s]}. Shed ${suitOnlyOff} off-suit tile${suitOnlyOff !== 1 ? 's' : ''}. 7 fan — very high payoff.`,
+          description: `${comp.suitCounts[s]} ${SUIT_NAMES[s]} tiles. Shed ${offSuitCount} off-suit tile${offSuitCount !== 1 ? 's' : ''} for 7 fan.`,
           tilesNeeded: [],
-          probability: suitOnlyOff <= 2 ? 0.5 : 0.25,
+          probability: offSuitCount <= 2 ? 0.5 : 0.25,
         });
       }
     }
   }
 
+  // All Pongs path
   if (comp.tripletCount >= 2 || comp.pairs >= 3) {
     paths.push({
       name: 'All Pongs',
       fan: 3,
-      description: `${comp.tripletCount} triplet${comp.tripletCount !== 1 ? 's' : ''}, ${comp.pairs} pair${comp.pairs !== 1 ? 's' : ''}. Requires all 4 melds as pongs.`,
+      description: `${comp.tripletCount} triplet${comp.tripletCount !== 1 ? 's' : ''}, ${comp.pairs} pair${comp.pairs !== 1 ? 's' : ''}. All 4 melds must be pongs.`,
       tilesNeeded: [],
       probability: comp.tripletCount >= 3 ? 0.5 : 0.2,
     });
   }
 
+  // Honor value anchors
   let dragonPongCount = 0;
   let windPongCount = 0;
   let valuePairCount = 0;
@@ -427,7 +440,7 @@ function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMod
     paths.push({
       name: 'Honor Value Hand',
       fan,
-      description: `${desc.join(' and ')} = ${fan} fan. Build around these anchors. Concealed + Self-Drawn adds +2 to reach 3-fan.`,
+      description: `${desc.join(' and ')} = ${fan} fan. Build the rest of your hand around these anchors.`,
       tilesNeeded: [],
       probability: 0.6,
     });
@@ -437,12 +450,13 @@ function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMod
     paths.push({
       name: 'Value Pair Upgrade',
       fan: 1,
-      description: `${valuePairCount} pair${valuePairCount > 1 ? 's' : ''} of value tiles. Drawing a third makes a pong worth 1 fan each.`,
+      description: `${valuePairCount} value pair${valuePairCount > 1 ? 's' : ''}. Drawing a third makes a pong worth 1 fan each.`,
       tilesNeeded: [],
       probability: 0.3,
     });
   }
 
+  // Thirteen Orphans
   let orphanCount = 0;
   let orphanMissing: TileIndex[] = [];
   for (const idx of THIRTEEN_ORPHAN_INDICES) {
@@ -459,11 +473,13 @@ function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMod
     });
   }
 
-  if (ctx.isConcealed) {
+  // Only show Concealed + Self-Drawn for shanten 0-1 where it's a realistic scoring path
+  // At higher shanten it's too speculative and misleading
+  if (shanten <= 1 && ctx.isConcealed && paths.length < 3) {
     paths.push({
       name: 'Concealed + Self-Drawn',
       fan: 2,
-      description: 'Keep hand concealed. Win by self-draw = 2 fan. Need 1 more fan to meet 3-fan minimum (e.g., a value pong or All Chows).',
+      description: 'Keep concealed and win by self-draw for 2 fan. Combine with one more fan source to reach 3-fan minimum.',
       tilesNeeded: [],
       probability: 0.3,
     });
@@ -471,6 +487,100 @@ function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMod
 
   paths.sort((a, b) => b.fan - a.fan || b.probability - a.probability);
   return paths.slice(0, 5);
+}
+
+// Early game directions: broad strategic advice for shanten 4+ hands
+function findEarlyGameDirections(tiles: TileCounts, comp: HandComposition, ctx: GameContext, shanten: number): HandPath[] {
+  const paths: HandPath[] = [];
+  const nonZeroSuits = comp.suitCounts.filter(c => c > 0).length;
+  const maxSuit = Math.max(...comp.suitCounts);
+  const dominantSuitIdx = comp.suitCounts.indexOf(maxSuit);
+  const totalTiles = comp.suitCounts[0] + comp.suitCounts[1] + comp.suitCounts[2] + comp.honorCount;
+
+  // Describe what the hand naturally leans toward
+
+  // Flush direction (suit concentration)
+  if (maxSuit >= 7) {
+    const concentration = Math.round((maxSuit / totalTiles) * 100);
+    paths.push({
+      name: 'Full Flush',
+      fan: 7,
+      description: `${concentration}% of your tiles are ${SUIT_NAMES[dominantSuitIdx]} (${maxSuit} tiles). This hand naturally leans toward a flush. Prioritize keeping ${SUIT_NAMES[dominantSuitIdx]} tiles and shedding other suits over the next few draws.`,
+      tilesNeeded: [],
+      probability: 0.2,
+    });
+  } else if (maxSuit >= 5) {
+    const concentration = Math.round((maxSuit / totalTiles) * 100);
+    paths.push({
+      name: 'Half Flush',
+      fan: 3,
+      description: `${SUIT_NAMES[dominantSuitIdx]} is your strongest suit (${maxSuit} tiles, ${concentration}%). A Half Flush is possible if you steer toward ${SUIT_NAMES[dominantSuitIdx]} + honors and shed other suits. Watch the next few draws to see if this direction strengthens.`,
+      tilesNeeded: [],
+      probability: 0.15,
+    });
+  }
+
+  // Pong direction
+  if (comp.tripletCount >= 1 || comp.pairs >= 3) {
+    const pongAssets = comp.tripletCount + comp.pairs;
+    paths.push({
+      name: 'All Pongs',
+      fan: 3,
+      description: `You have ${comp.tripletCount} triplet${comp.tripletCount !== 1 ? 's' : ''} and ${comp.pairs} pair${comp.pairs !== 1 ? 's' : ''} (${pongAssets} pong-building blocks). If more pairs develop into triplets, All Pongs becomes viable.`,
+      tilesNeeded: [],
+      probability: comp.pairs >= 4 ? 0.2 : 0.1,
+    });
+  }
+
+  // Honor anchors
+  let honorAnchors: string[] = [];
+  for (let i = WINDS_START; i < NUM_TILE_TYPES; i++) {
+    if (tiles[i] >= 2) {
+      const isScoring = i >= DRAGONS_START || i === WINDS_START + ctx.seatWind || i === WINDS_START + ctx.prevailingWind;
+      if (isScoring) {
+        const name = TILE_INFO[i].name;
+        honorAnchors.push(`${name}${tiles[i] >= 3 ? ' (pong!)' : ' pair'}`);
+      }
+    }
+  }
+  if (honorAnchors.length > 0) {
+    paths.push({
+      name: 'Honor Value Hand',
+      fan: honorAnchors.length,
+      description: `You have scoring honor tiles: ${honorAnchors.join(', ')}. These are valuable anchors — hold onto them. Each pong of a Dragon or your seat/round Wind is worth 1 fan.`,
+      tilesNeeded: [],
+      probability: 0.3,
+    });
+  }
+
+  // Thirteen Orphans (rare but worth noting early)
+  let orphanCount = 0;
+  for (const idx of THIRTEEN_ORPHAN_INDICES) {
+    if (tiles[idx] >= 1) orphanCount++;
+  }
+  if (orphanCount >= 8) {
+    paths.push({
+      name: 'Thirteen Orphans',
+      fan: 10,
+      description: `${orphanCount}/13 unique terminals and honors — unusually high. This rare limit hand (10 fan) might be reachable if you commit to it now.`,
+      tilesNeeded: [],
+      probability: 0.05,
+    });
+  }
+
+  // General speed path — when no strong pattern emerges
+  if (paths.length === 0) {
+    paths.push({
+      name: 'Speed / Mixed Hand',
+      fan: 3,
+      description: `No dominant pattern yet — your tiles are spread across ${nonZeroSuits} suit${nonZeroSuits !== 1 ? 's' : ''} + ${comp.honorCount > 0 ? 'honors' : 'no honors'}. Focus on tile efficiency: discard isolated tiles, keep connected groups, and see what direction the next few draws suggest. You'll likely need Concealed Hand + Self-Drawn + a value pong or All Chows to reach 3 fan.`,
+      tilesNeeded: [],
+      probability: 0.4,
+    });
+  }
+
+  paths.sort((a, b) => b.fan - a.fan || b.probability - a.probability);
+  return paths.slice(0, 4);
 }
 
 interface HandComposition {
@@ -542,8 +652,10 @@ function identifyStrategies(tiles: TileCounts, comp: HandComposition, ctx: GameC
     strategies.push(`Or push Full Flush (7 fan) by shedding honors too — riskier but much higher payoff.`);
   } else if (maxSuit >= 9) {
     strategies.push(`Strong ${SUIT_NAMES[dominantSuitIdx]} (${maxSuit} tiles). Consider steering toward a flush.`);
+  } else if (maxSuit >= 6) {
+    strategies.push(`Leaning toward ${SUIT_NAMES[dominantSuitIdx]} (${maxSuit} tiles). Not enough for a flush yet, but worth watching — a few more draws in this suit could open a Half Flush path.`);
   } else {
-    strategies.push('Mixed suits — aim for speed. Concealed + Self-Drawn + a value pong = 3 fan.');
+    strategies.push('Mixed suits — focus on tile efficiency (discard isolated tiles, keep connected groups) and let the hand develop. Look for natural patterns to emerge over the next few draws.');
   }
 
   if (comp.tripletCount >= 2) {
