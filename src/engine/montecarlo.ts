@@ -72,7 +72,7 @@ function calculatePayout(fan: number, mode: RulesetMode): number {
 // Secondary: maximize hand potential score — preserves paths to higher-scoring hands
 // This biases simulations toward flush, pong, honor, and other high-value patterns.
 
-function fastPickDiscard(tiles: TileCounts, includeSevenPairs: boolean, ctx?: GameContext): TileIndex {
+export function fastPickDiscard(tiles: TileCounts, includeSevenPairs: boolean, ctx?: GameContext): TileIndex {
   let bestTile = -1;
   let bestShanten = 99;
   let bestPotential = -999;

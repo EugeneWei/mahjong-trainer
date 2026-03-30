@@ -65,7 +65,7 @@ export interface AnalysisResult {
 
 const SUIT_NAMES = ['Bamboo', 'Characters', 'Dots'];
 
-export function analyzeHand(tiles: TileCounts, ctx: GameContext, mode: RulesetMode = 'hk'): AnalysisResult {
+export function analyzeHand(tiles: TileCounts, ctx: GameContext, mode: RulesetMode = 'hk', deadTiles?: TileCounts): AnalysisResult {
   const config = getRulesetConfig(mode);
   const includeSevenPairs = config.sevenPairsEnabled;
   const currentShanten = calculateShanten(tiles, includeSevenPairs);
@@ -76,7 +76,7 @@ export function analyzeHand(tiles: TileCounts, ctx: GameContext, mode: RulesetMo
     if (tiles[i] > 0 && !seen.has(i)) {
       seen.add(i);
       tiles[i]--;
-      const option = analyzeDiscard(tiles, i, ctx, mode, includeSevenPairs);
+      const option = analyzeDiscard(tiles, i, ctx, mode, includeSevenPairs, deadTiles);
       discards.push(option);
       tiles[i]++;
     }
@@ -200,9 +200,9 @@ function detectTileGroups(tiles: TileCounts): TileGroup[] {
   return groups;
 }
 
-function analyzeDiscard(tiles: TileCounts, discardedTile: TileIndex, ctx: GameContext, mode: RulesetMode = 'hk', includeSevenPairs: boolean = false): DiscardOption {
+function analyzeDiscard(tiles: TileCounts, discardedTile: TileIndex, ctx: GameContext, mode: RulesetMode = 'hk', includeSevenPairs: boolean = false, deadTiles?: TileCounts): DiscardOption {
   const shanten = calculateShanten(tiles, includeSevenPairs);
-  const { tiles: acceptTiles, count: acceptance } = getAcceptanceTiles(tiles, shanten, undefined, includeSevenPairs);
+  const { tiles: acceptTiles, count: acceptance } = getAcceptanceTiles(tiles, shanten, deadTiles, includeSevenPairs);
   const config = getRulesetConfig(mode);
 
   const reachableHands: ReachableHand[] = [];
@@ -210,7 +210,8 @@ function analyzeDiscard(tiles: TileCounts, discardedTile: TileIndex, ctx: GameCo
 
   if (shanten === 0) {
     for (let i = 0; i < NUM_TILE_TYPES; i++) {
-      const remaining = TILES_PER_TYPE - tiles[i] - (i === discardedTile ? 1 : 0);
+      const dead = deadTiles ? deadTiles[i] : 0;
+      const remaining = TILES_PER_TYPE - tiles[i] - (i === discardedTile ? 1 : 0) - dead;
       if (remaining <= 0) continue;
 
       tiles[i]++;

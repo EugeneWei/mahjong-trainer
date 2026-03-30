@@ -1,129 +1,213 @@
 import { useState, useCallback, useMemo } from 'react';
-import TileRow from '../components/tiles/TileRow';
 import TileSVG from '../components/tiles/TileSVG';
-import GameContextPanel from '../components/input/GameContext';
 import AnalysisPanel from '../components/analysis/AnalysisPanel';
 import MonteCarloPanel from '../components/analysis/MonteCarloPanel';
+import TableView from '../components/layout/TableView';
 import {
   cloneTileCounts,
-  TILES_PER_TYPE,
   totalTileCount,
   type TileCounts,
+  type TileIndex,
 } from '../engine/tiles';
 import { createDefaultGameContext, type GameContext } from '../engine/hand';
-import { analyzeHand, describeHandStrategy, tileFullName } from '../engine/analysis';
-import { generateHandForPhase, SeededRNG, type GamePhase } from '../engine/generator';
-import { calculateShanten } from '../engine/shanten';
+import { tileFullName } from '../engine/analysis';
 import type { AnalysisResult } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
 import { getRulesetConfig } from '../engine/rulesets';
 import GlossaryLinkedText from '../components/shared/GlossaryLinkedText';
 import { useMonteCarloAnalysis } from '../hooks/useMonteCarloAnalysis';
+import {
+  initializeGame,
+  simulateAITurn,
+  simulateHumanDraw,
+  executeHumanDiscard,
+  advanceAITurns,
+  getWallRemaining,
+  getDeadTiles,
+  buildGameContext,
+  type GameState,
+  type GameTurn,
+} from '../engine/game-sim';
 
 interface WalkthroughModeProps {
   rulesetMode: RulesetMode;
 }
 
-interface Turn {
-  tiles: TileCounts; // 14-tile hand (including drawn tile), or 13 for opening
-  handBeforeDraw: TileCounts | null; // 13-tile hand before drawing (for display)
-  drawnTile: number | null;
-  discardedTile: number | null;
-  analysis: AnalysisResult | null;
-  strategy: string;
-  wallRemaining: number;
+type WalkthroughPhase = 'setup' | 'human-turn' | 'between-turns' | 'game-over';
+
+interface WalkthroughState {
+  gameState: GameState;
+  allTurns: GameTurn[];       // all turns so far
+  currentHumanTurn: GameTurn | null;
+  phase: WalkthroughPhase;
+  message: string;
+  humanAnalysis: AnalysisResult | null;
 }
 
 export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
-  const [phase, setPhase] = useState<GamePhase>('early');
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [currentTurn, setCurrentTurn] = useState(0);
+  const [state, setState] = useState<WalkthroughState | null>(null);
+  const [viewTurnIndex, setViewTurnIndex] = useState(-1); // -1 = current live view
 
   const config = getRulesetConfig(rulesetMode);
 
-  const generateWalkthrough = useCallback(() => {
-    const result = generateHandForPhase({ phase });
-    const rng = new SeededRNG(Date.now());
-    const newTurns: Turn[] = [];
-    let currentTiles = cloneTileCounts(result.tiles);
-    let wall = result.wallRemaining;
+  // Start a new game
+  const startGame = useCallback(() => {
+    const gameState = initializeGame({ seed: Date.now() });
+    // Run AI turns before human's first turn (players 1, 2, 3 go first if East is player 0)
+    // Actually in standard Mahjong, East (player 0) goes first. So human draws first.
+    const humanTurn = simulateHumanDraw(gameState, rulesetMode);
 
-    const ctx0: GameContext = {
-      ...createDefaultGameContext(),
-      wallRemaining: wall,
-    };
-    newTurns.push({
-      tiles: cloneTileCounts(currentTiles),
-      handBeforeDraw: null,
-      drawnTile: null,
-      discardedTile: null,
-      analysis: null,
-      strategy: describeHandStrategy(currentTiles, ctx0, rulesetMode),
-      wallRemaining: wall,
-    });
-
-    for (let turn = 0; turn < 10 && wall > 0; turn++) {
-      const available: number[] = [];
-      for (let i = 0; i < 34; i++) {
-        const rem = TILES_PER_TYPE - currentTiles[i];
-        for (let j = 0; j < rem; j++) available.push(i);
-      }
-      if (available.length === 0) break;
-
-      const handBefore = cloneTileCounts(currentTiles);
-      const drawn = available[rng.randomInt(available.length)];
-      currentTiles[drawn]++;
-      wall--;
-
-      const ctx: GameContext = {
-        ...createDefaultGameContext(),
-        wallRemaining: wall,
-      };
-
-      if (calculateShanten(currentTiles, config.sevenPairsEnabled) === -1) {
-        newTurns.push({
-          tiles: cloneTileCounts(currentTiles),
-          handBeforeDraw: handBefore,
-          drawnTile: drawn,
-          discardedTile: null,
-          analysis: null,
-          strategy: `Winning hand! Drew ${tileFullName(drawn)} to complete the hand. Tsumo!`,
-          wallRemaining: wall,
-        });
-        break;
-      }
-
-      const analysis = analyzeHand(cloneTileCounts(currentTiles), ctx, rulesetMode);
-      const discard = analysis.bestDiscard;
-
-      newTurns.push({
-        tiles: cloneTileCounts(currentTiles),
-        handBeforeDraw: handBefore,
-        drawnTile: drawn,
-        discardedTile: discard,
-        analysis,
-        strategy: describeHandStrategy(currentTiles, ctx, rulesetMode),
-        wallRemaining: wall,
+    if (!humanTurn) {
+      setState({
+        gameState,
+        allTurns: [],
+        currentHumanTurn: null,
+        phase: 'game-over',
+        message: 'Wall is empty.',
+        humanAnalysis: null,
       });
-
-      currentTiles[discard]--;
+      return;
     }
 
-    setTurns(newTurns);
-    setCurrentTurn(0);
-  }, [phase, rulesetMode, config.sevenPairsEnabled]);
+    if (humanTurn.isWin) {
+      setState({
+        gameState,
+        allTurns: [humanTurn],
+        currentHumanTurn: humanTurn,
+        phase: 'game-over',
+        message: `You drew ${tileFullName(humanTurn.drawnTile)} and won on your first draw! Tsumo!`,
+        humanAnalysis: null,
+      });
+      return;
+    }
 
-  const turn = turns[currentTurn];
+    setState({
+      gameState,
+      allTurns: [humanTurn],
+      currentHumanTurn: humanTurn,
+      phase: 'human-turn',
+      message: `You drew ${tileFullName(humanTurn.drawnTile)}. Choose a tile to discard.`,
+      humanAnalysis: humanTurn.analysis ?? null,
+    });
+    setViewTurnIndex(-1);
+  }, [rulesetMode]);
 
-  // Monte Carlo for current turn (if it has a 14-tile hand with analysis)
-  const mcTiles = useMemo(
-    () => (turn && turn.analysis && totalTileCount(turn.tiles) === 14 ? turn.tiles : null),
-    [turn],
-  );
-  const mcCtx = useMemo(
-    () => (turn && turn.analysis ? { ...createDefaultGameContext(), wallRemaining: turn.wallRemaining } : null),
-    [turn],
-  );
+  // Human discards a tile
+  const handleDiscard = useCallback((tile: TileIndex) => {
+    if (!state || state.phase !== 'human-turn' || !state.currentHumanTurn) return;
+
+    const gameState = state.gameState;
+
+    // Execute the discard
+    executeHumanDiscard(gameState, tile);
+
+    // Update the current human turn record
+    const updatedHumanTurn: GameTurn = {
+      ...state.currentHumanTurn,
+      discardedTile: tile,
+      handAfter: cloneTileCounts(gameState.players[0].hand),
+    };
+
+    // Update dead tiles
+    gameState.deadTiles = getDeadTiles(gameState);
+
+    // Run AI turns
+    const aiTurns = advanceAITurns(gameState, rulesetMode);
+
+    // Check if any AI won
+    const aiWinner = aiTurns.find(t => t.isWin);
+    if (aiWinner) {
+      setState({
+        ...state,
+        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...aiTurns],
+        currentHumanTurn: null,
+        phase: 'game-over',
+        message: `Player ${aiWinner.player} (${['East', 'South', 'West', 'North'][gameState.players[aiWinner.player].seatWind]}) won!`,
+        humanAnalysis: null,
+      });
+      return;
+    }
+
+    // Check if wall is empty
+    if (getWallRemaining(gameState) === 0) {
+      setState({
+        ...state,
+        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...aiTurns],
+        currentHumanTurn: null,
+        phase: 'game-over',
+        message: 'Wall is empty. Draw game.',
+        humanAnalysis: null,
+      });
+      return;
+    }
+
+    // Show what the AIs did before human's next turn
+    const aiDiscardMessages = aiTurns.map(t => {
+      const windName = ['East', 'South', 'West', 'North'][gameState.players[t.player].seatWind];
+      return `${windName} discarded ${tileFullName(t.discardedTile!)}`;
+    });
+
+    setState({
+      ...state,
+      allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...aiTurns],
+      currentHumanTurn: null,
+      phase: 'between-turns',
+      message: `You discarded ${tileFullName(tile)}. ${aiDiscardMessages.join('. ')}.`,
+      humanAnalysis: null,
+    });
+  }, [state, rulesetMode]);
+
+  // Advance to human's next turn
+  const nextTurn = useCallback(() => {
+    if (!state || state.phase !== 'between-turns') return;
+
+    const gameState = state.gameState;
+    const humanTurn = simulateHumanDraw(gameState, rulesetMode);
+
+    if (!humanTurn) {
+      setState({
+        ...state,
+        phase: 'game-over',
+        message: 'Wall is empty. Draw game.',
+        humanAnalysis: null,
+      });
+      return;
+    }
+
+    if (humanTurn.isWin) {
+      setState({
+        ...state,
+        allTurns: [...state.allTurns, humanTurn],
+        currentHumanTurn: humanTurn,
+        phase: 'game-over',
+        message: `You drew ${tileFullName(humanTurn.drawnTile)} and won! Tsumo!`,
+        humanAnalysis: null,
+      });
+      return;
+    }
+
+    setState({
+      ...state,
+      allTurns: [...state.allTurns, humanTurn],
+      currentHumanTurn: humanTurn,
+      phase: 'human-turn',
+      message: `You drew ${tileFullName(humanTurn.drawnTile)}. Choose a tile to discard.`,
+      humanAnalysis: humanTurn.analysis ?? null,
+    });
+  }, [state, rulesetMode]);
+
+  // Monte Carlo for current human turn
+  const mcTiles = useMemo(() => {
+    if (!state || state.phase !== 'human-turn' || !state.currentHumanTurn) return null;
+    const hand = state.currentHumanTurn.handAfter;
+    return totalTileCount(hand) === 14 ? hand : null;
+  }, [state]);
+
+  const mcCtx = useMemo(() => {
+    if (!state || state.phase !== 'human-turn') return null;
+    return buildGameContext(state.gameState, 0);
+  }, [state]);
+
   const {
     results: mcResults,
     progress: mcProgress,
@@ -134,133 +218,144 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
     run: runMC,
   } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 300, false);
 
+  // Count human's turns for display
+  const humanTurnCount = state ? state.allTurns.filter(t => t.player === 0).length : 0;
+
   return (
     <div className="p-4 space-y-4 pb-24">
-      <h1 className="text-lg font-bold text-slate-200">Walkthrough</h1>
+      <h1 className="text-lg font-bold text-slate-200">Walkthrough (4-Player Game)</h1>
 
-      {/* Phase selector */}
-      <div className="flex items-center gap-2">
-        {(['early', 'mid', 'late'] as GamePhase[]).map((p) => (
-          <button
-            key={p}
-            onClick={() => setPhase(p)}
-            className={`px-3 py-1 text-sm rounded-lg ${
-              phase === p ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400'
-            }`}
-          >
-            {p.charAt(0).toUpperCase() + p.slice(1)}
-          </button>
-        ))}
-      </div>
+      {/* Start button */}
+      {(!state || state.phase === 'game-over') && (
+        <button
+          onClick={startGame}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg text-sm"
+        >
+          {state ? 'New Game' : 'Start Game'}
+        </button>
+      )}
 
-      <button
-        onClick={generateWalkthrough}
-        className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg text-sm"
-      >
-        Generate Walkthrough
-      </button>
-
-      {turn && (
+      {state && (
         <>
-          {/* Turn navigation */}
-          <div className="flex items-center justify-between">
-            <button
-              onClick={() => setCurrentTurn(Math.max(0, currentTurn - 1))}
-              disabled={currentTurn === 0}
-              className="px-3 py-1.5 text-sm bg-slate-700 rounded disabled:opacity-30 text-slate-300"
-            >
-              Prev
-            </button>
-            <span className="text-sm text-slate-400">
-              Turn {currentTurn}/{turns.length - 1}
-            </span>
-            <button
-              onClick={() => setCurrentTurn(Math.min(turns.length - 1, currentTurn + 1))}
-              disabled={currentTurn === turns.length - 1}
-              className="px-3 py-1.5 text-sm bg-slate-700 rounded disabled:opacity-30 text-slate-300"
-            >
-              Next
-            </button>
+          {/* Message */}
+          <div className="bg-slate-800/60 rounded-lg p-3">
+            <GlossaryLinkedText
+              text={state.message}
+              className="text-sm text-slate-300 leading-relaxed"
+            />
           </div>
 
-          {/* Game context */}
-          <GameContextPanel
-            context={{ ...createDefaultGameContext(), wallRemaining: turn.wallRemaining }}
-            onChange={() => {}}
-            readOnly
-          />
-
-          {/* Hand display */}
-          <div className="bg-slate-800/50 rounded-lg p-3">
-            {currentTurn === 0 ? (
-              <>
-                <div className="text-xs text-slate-400 mb-2">Opening Hand (13 tiles)</div>
-                <TileRow tiles={turn.tiles} size="lg" />
-              </>
-            ) : turn.drawnTile !== null ? (
-              <>
-                <div className="text-xs text-slate-400 mb-2">
-                  {turn.discardedTile !== null
-                    ? `Drew ${tileFullName(turn.drawnTile)} — discard ${tileFullName(turn.discardedTile)} (red outline)`
-                    : `Drew ${tileFullName(turn.drawnTile)} — winning tile!`}
-                </div>
-                <TileRow
-                  tiles={turn.tiles}
-                  size="lg"
-                  drawnTile={turn.drawnTile}
-                  dangerTiles={turn.discardedTile !== null ? [turn.discardedTile] : []}
-                />
-              </>
-            ) : (
-              <TileRow tiles={turn.tiles} size="lg" />
-            )}
-          </div>
-
-          {/* Strategy explanation */}
-          <div className="bg-slate-800/50 rounded-lg p-3">
-            <h3 className="text-sm font-medium text-slate-300 mb-1">Strategy</h3>
-            <GlossaryLinkedText text={turn.strategy} className="text-xs text-slate-400 leading-relaxed" />
-          </div>
-
-          {/* Discard explanation */}
-          {turn.discardedTile !== null && turn.analysis && (
-            <div className="bg-slate-800/50 rounded-lg p-3">
-              <h3 className="text-sm font-medium text-slate-300 mb-1">Why discard {tileFullName(turn.discardedTile)}?</h3>
-              <div className="flex items-center gap-2 mb-2">
-                <TileSVG tile={turn.discardedTile} size="md" danger />
-                <div className="text-xs text-slate-400">
-                  {turn.analysis.discards[0]?.explanation}
-                </div>
+          {/* Table View with all rivers and human's hand */}
+          <TableView
+            gameState={state.gameState}
+            humanHand={
+              state.currentHumanTurn
+                ? state.currentHumanTurn.handAfter
+                : state.gameState.players[0].hand
+            }
+            drawnTile={
+              state.phase === 'human-turn' && state.currentHumanTurn
+                ? state.currentHumanTurn.drawnTile
+                : undefined
+            }
+            dangerTiles={
+              state.humanAnalysis
+                ? [state.humanAnalysis.bestDiscard]
+                : []
+            }
+            onTileClick={state.phase === 'human-turn' ? handleDiscard : undefined}
+          >
+            {/* Center area: dead tile summary */}
+            <div className="bg-slate-800/40 rounded-lg p-2 text-center">
+              <div className="text-xs text-slate-500 mb-1">Dead Tiles</div>
+              <div className="text-xs text-slate-400">
+                {(() => {
+                  const dead = state.gameState.deadTiles;
+                  let total = 0;
+                  for (let i = 0; i < 34; i++) total += dead[i];
+                  return `${total} tiles in rivers`;
+                })()}
               </div>
-              {turn.analysis.winningPaths.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-slate-600/50">
-                  <div className="text-xs text-slate-400 font-medium mb-1">Building toward:</div>
-                  {turn.analysis.winningPaths.slice(0, 2).map((path, idx) => (
-                    <div key={idx} className="text-xs text-slate-400 mt-1">
-                      <span className="text-amber-400 font-bold">{path.fan} fan</span>{' '}
-                      <GlossaryLinkedText text={`${path.name} — ${path.description}`} className="text-slate-300" />
-                    </div>
-                  ))}
-                </div>
-              )}
+              <div className="text-xs text-slate-500 mt-1">
+                Turn {humanTurnCount} | Wall: {getWallRemaining(state.gameState)}
+              </div>
+            </div>
+          </TableView>
+
+          {/* Between turns: show AI actions and advance button */}
+          {state.phase === 'between-turns' && (
+            <button
+              onClick={nextTurn}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-lg text-sm"
+            >
+              Draw Next Tile
+            </button>
+          )}
+
+          {/* Game over */}
+          {state.phase === 'game-over' && (
+            <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-3 text-center">
+              <div className="text-lg font-bold text-amber-400">Game Over</div>
+              <div className="text-sm text-slate-300 mt-1">{state.message}</div>
             </div>
           )}
 
-          {/* Full analysis */}
-          {turn.analysis && <AnalysisPanel result={turn.analysis} showTopN={3} showPaths={false} />}
+          {/* Analysis section (during human's turn) */}
+          {state.phase === 'human-turn' && state.humanAnalysis && (
+            <>
+              {/* Strategy explanation */}
+              <div className="bg-slate-800/50 rounded-lg p-3">
+                <h3 className="text-sm font-medium text-slate-300 mb-1">Analysis</h3>
+                <GlossaryLinkedText
+                  text={state.humanAnalysis.handAnalysis}
+                  className="text-xs text-slate-400 leading-relaxed whitespace-pre-line"
+                />
+              </div>
 
-          {/* Monte Carlo */}
-          {turn.analysis && totalTileCount(turn.tiles) === 14 && (
-            <MonteCarloPanel
-              results={mcResults}
-              progress={mcProgress}
-              isRunning={mcRunning}
-              error={mcError}
-              rulesetMode={rulesetMode}
-              method={mcMethod}
-              shanten={mcShanten}
-              onRun={runMC}
-            />
+              {/* Discard recommendation */}
+              <div className="bg-slate-800/50 rounded-lg p-3">
+                <h3 className="text-sm font-medium text-slate-300 mb-1">
+                  Recommended: discard {tileFullName(state.humanAnalysis.bestDiscard)}
+                </h3>
+                <div className="flex items-center gap-2 mb-2">
+                  <TileSVG tile={state.humanAnalysis.bestDiscard} size="md" danger />
+                  <div className="text-xs text-slate-400">
+                    {state.humanAnalysis.discards[0]?.explanation}
+                  </div>
+                </div>
+                {state.humanAnalysis.winningPaths.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-slate-600/50">
+                    <div className="text-xs text-slate-400 font-medium mb-1">Building toward:</div>
+                    {state.humanAnalysis.winningPaths.slice(0, 2).map((path, idx) => (
+                      <div key={idx} className="text-xs text-slate-400 mt-1">
+                        <span className="text-amber-400 font-bold">{path.fan} {config.unit}</span>{' '}
+                        <GlossaryLinkedText
+                          text={`${path.name} — ${path.description}`}
+                          className="text-slate-300"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Full discard analysis */}
+              <AnalysisPanel result={state.humanAnalysis} showTopN={3} showPaths={false} />
+
+              {/* Monte Carlo */}
+              {mcTiles && (
+                <MonteCarloPanel
+                  results={mcResults}
+                  progress={mcProgress}
+                  isRunning={mcRunning}
+                  error={mcError}
+                  rulesetMode={rulesetMode}
+                  method={mcMethod}
+                  shanten={mcShanten}
+                  onRun={runMC}
+                />
+              )}
+            </>
           )}
         </>
       )}
