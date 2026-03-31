@@ -10,7 +10,7 @@ import {
   type TileIndex,
 } from '../engine/tiles';
 import { createDefaultGameContext, type GameContext } from '../engine/hand';
-import { tileFullName } from '../engine/analysis';
+import { tileFullName, analyzeHand } from '../engine/analysis';
 import type { AnalysisResult } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
 import { getRulesetConfig } from '../engine/rulesets';
@@ -25,15 +25,18 @@ import {
   getWallRemaining,
   getDeadTiles,
   buildGameContext,
+  getClaimOptions,
+  executeClaim,
   type GameState,
   type GameTurn,
+  type ClaimOption,
 } from '../engine/game-sim';
 
 interface WalkthroughModeProps {
   rulesetMode: RulesetMode;
 }
 
-type WalkthroughPhase = 'setup' | 'human-turn' | 'between-turns' | 'game-over';
+type WalkthroughPhase = 'setup' | 'human-turn' | 'between-turns' | 'claim-decision' | 'game-over';
 
 interface WalkthroughState {
   gameState: GameState;
@@ -43,6 +46,8 @@ interface WalkthroughState {
   message: string;
   humanAnalysis: AnalysisResult | null;
   selectedTile: TileIndex | null;  // two-step discard: selected but not yet confirmed
+  claimOptions: ClaimOption[];     // available pong/chow options from last AI discard
+  pendingAITurns: GameTurn[];      // AI turns that happened before the claim opportunity
 }
 
 export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
@@ -67,6 +72,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         message: 'Wall is empty.',
         humanAnalysis: null,
         selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
       });
       return;
     }
@@ -80,6 +87,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         message: `You drew ${tileFullName(humanTurn.drawnTile)} and won on your first draw! Tsumo!`,
         humanAnalysis: null,
         selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
       });
       return;
     }
@@ -92,6 +101,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       message: `You drew ${tileFullName(humanTurn.drawnTile)}. Click on a tile to discard it.`,
       humanAnalysis: humanTurn.analysis ?? null,
       selectedTile: null,
+      claimOptions: [],
+      pendingAITurns: [],
     });
     setViewTurnIndex(-1);
   }, [rulesetMode]);
@@ -125,53 +136,194 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
     // Update dead tiles
     gameState.deadTiles = getDeadTiles(gameState);
 
-    // Run AI turns
-    const aiTurns = advanceAITurns(gameState, rulesetMode);
+    // Run AI turns one at a time, checking for claim opportunities after each
+    const result = runAITurnsWithClaimCheck(gameState, rulesetMode);
 
-    // Check if any AI won
-    const aiWinner = aiTurns.find(t => t.isWin);
-    if (aiWinner) {
+    if (result.type === 'game-over') {
       setState({
         ...state,
-        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...aiTurns],
+        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...result.aiTurns],
         currentHumanTurn: null,
         phase: 'game-over',
-        message: `Player ${aiWinner.player} (${['East', 'South', 'West', 'North'][gameState.players[aiWinner.player].seatWind]}) won!`,
+        message: result.message,
         humanAnalysis: null,
         selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
       });
-      return;
-    }
-
-    // Check if wall is empty
-    if (getWallRemaining(gameState) === 0) {
+    } else if (result.type === 'claim-available') {
+      // An AI discarded something the human can claim
+      const lastAI = result.aiTurns[result.aiTurns.length - 1];
+      const windName = ['East', 'South', 'West', 'North'][gameState.players[lastAI.player].seatWind];
       setState({
         ...state,
-        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...aiTurns],
+        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...result.aiTurns],
         currentHumanTurn: null,
-        phase: 'game-over',
-        message: 'Wall is empty. Draw game.',
+        phase: 'claim-decision',
+        message: `${windName} discarded ${tileFullName(lastAI.discardedTile!)}. You can claim this tile!`,
         humanAnalysis: null,
         selectedTile: null,
+        claimOptions: result.claimOptions!,
+        pendingAITurns: result.aiTurns,
       });
-      return;
+    } else {
+      // Normal between-turns
+      const aiDiscardMessages = result.aiTurns.map(t => {
+        const windName = ['East', 'South', 'West', 'North'][gameState.players[t.player].seatWind];
+        return `${windName} discarded ${tileFullName(t.discardedTile!)}`;
+      });
+      setState({
+        ...state,
+        allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...result.aiTurns],
+        currentHumanTurn: null,
+        phase: 'between-turns',
+        message: `You discarded ${tileFullName(tile)}. ${aiDiscardMessages.join('. ')}.`,
+        humanAnalysis: null,
+        selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
+      });
+    }
+  }, [state, rulesetMode]);
+
+  // Run AI turns one at a time, checking for human claim opportunities after each discard
+  function runAITurnsWithClaimCheck(
+    gameState: GameState,
+    mode: RulesetMode
+  ): {
+    type: 'normal' | 'game-over' | 'claim-available';
+    aiTurns: GameTurn[];
+    message: string;
+    claimOptions?: ClaimOption[];
+  } {
+    const aiTurns: GameTurn[] = [];
+
+    // Move to next player after human
+    gameState.currentPlayer = (gameState.currentPlayer + 1) % 4;
+
+    while (gameState.currentPlayer !== 0) {
+      const playerIdx = gameState.currentPlayer;
+      const turn = simulateAITurn(gameState, playerIdx, mode);
+
+      if (!turn) {
+        return { type: 'game-over', aiTurns, message: 'Wall is empty. Draw game.' };
+      }
+
+      aiTurns.push(turn);
+      gameState.turnNumber++;
+
+      if (turn.isWin) {
+        const windName = ['East', 'South', 'West', 'North'][gameState.players[playerIdx].seatWind];
+        return { type: 'game-over', aiTurns, message: `${windName} won!` };
+      }
+
+      // Check if human can claim this discard (pong or chow)
+      if (turn.discardedTile !== null) {
+        const claims = getClaimOptions(gameState, turn.discardedTile, playerIdx);
+        if (claims.length > 0) {
+          // Pause to offer the claim — don't advance further
+          return { type: 'claim-available', aiTurns, message: '', claimOptions: claims };
+        }
+      }
+
+      gameState.currentPlayer = (gameState.currentPlayer + 1) % 4;
     }
 
-    // Show what the AIs did before human's next turn
-    const aiDiscardMessages = aiTurns.map(t => {
-      const windName = ['East', 'South', 'West', 'North'][gameState.players[t.player].seatWind];
-      return `${windName} discarded ${tileFullName(t.discardedTile!)}`;
-    });
+    return { type: 'normal', aiTurns, message: '' };
+  }
+
+  // Handle claiming a discard (pong or chow)
+  const handleClaim = useCallback((claim: ClaimOption) => {
+    if (!state || state.phase !== 'claim-decision') return;
+
+    const gameState = state.gameState;
+
+    // Execute the claim
+    executeClaim(gameState, claim);
+    gameState.deadTiles = getDeadTiles(gameState);
+
+    // Analyze the 14-tile hand (human now has 14 tiles and must discard)
+    const ctx = buildGameContext(gameState, 0);
+    const analysis = analyzeHand(
+      cloneTileCounts(gameState.players[0].hand),
+      ctx,
+      rulesetMode,
+      gameState.deadTiles
+    );
+
+    const claimDesc = claim.type === 'pong'
+      ? `Pong! You claimed ${tileFullName(claim.tile)}.`
+      : `Chow! You claimed ${tileFullName(claim.tile)}.`;
 
     setState({
       ...state,
-      allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...aiTurns],
-      currentHumanTurn: null,
-      phase: 'between-turns',
-      message: `You discarded ${tileFullName(tile)}. ${aiDiscardMessages.join('. ')}.`,
-      humanAnalysis: null,
+      currentHumanTurn: {
+        player: 0,
+        drawnTile: claim.tile,
+        discardedTile: null,
+        handBefore: cloneTileCounts(gameState.players[0].hand), // already includes claimed tile
+        handAfter: cloneTileCounts(gameState.players[0].hand),
+        analysis,
+        isWin: false,
+        claim,
+      },
+      phase: 'human-turn',
+      message: `${claimDesc} Click on a tile to discard it.`,
+      humanAnalysis: analysis,
       selectedTile: null,
+      claimOptions: [],
     });
+  }, [state, rulesetMode]);
+
+  // Skip the claim opportunity
+  const handleSkipClaim = useCallback(() => {
+    if (!state || state.phase !== 'claim-decision') return;
+
+    const gameState = state.gameState;
+
+    // Continue the remaining AI turns
+    const result = runAITurnsWithClaimCheck(gameState, rulesetMode);
+
+    if (result.type === 'game-over') {
+      setState({
+        ...state,
+        allTurns: [...state.allTurns, ...result.aiTurns],
+        phase: 'game-over',
+        message: result.message,
+        humanAnalysis: null,
+        selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
+      });
+    } else if (result.type === 'claim-available') {
+      const lastAI = result.aiTurns[result.aiTurns.length - 1];
+      const windName = ['East', 'South', 'West', 'North'][gameState.players[lastAI.player].seatWind];
+      setState({
+        ...state,
+        allTurns: [...state.allTurns, ...result.aiTurns],
+        phase: 'claim-decision',
+        message: `${windName} discarded ${tileFullName(lastAI.discardedTile!)}. You can claim this tile!`,
+        claimOptions: result.claimOptions!,
+        pendingAITurns: [...state.pendingAITurns, ...result.aiTurns],
+        selectedTile: null,
+      });
+    } else {
+      const allAI = [...state.pendingAITurns, ...result.aiTurns];
+      const aiDiscardMessages = allAI.map(t => {
+        const windName = ['East', 'South', 'West', 'North'][gameState.players[t.player].seatWind];
+        return `${windName} discarded ${tileFullName(t.discardedTile!)}`;
+      });
+      setState({
+        ...state,
+        allTurns: [...state.allTurns, ...result.aiTurns],
+        phase: 'between-turns',
+        message: `${aiDiscardMessages.join('. ')}.`,
+        humanAnalysis: null,
+        selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
+      });
+    }
   }, [state, rulesetMode]);
 
   // Advance to human's next turn
@@ -188,6 +340,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         message: 'Wall is empty. Draw game.',
         humanAnalysis: null,
         selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
       });
       return;
     }
@@ -201,6 +355,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         message: `You drew ${tileFullName(humanTurn.drawnTile)} and won! Tsumo!`,
         humanAnalysis: null,
         selectedTile: null,
+        claimOptions: [],
+        pendingAITurns: [],
       });
       return;
     }
@@ -213,6 +369,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       message: `You drew ${tileFullName(humanTurn.drawnTile)}. Click on a tile to discard it.`,
       humanAnalysis: humanTurn.analysis ?? null,
       selectedTile: null,
+      claimOptions: [],
+      pendingAITurns: [],
     });
   }, [state, rulesetMode]);
 
@@ -322,6 +480,41 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
               >
                 Cancel
               </button>
+            </div>
+          )}
+
+          {/* Claim decision: pong/chow/skip */}
+          {state.phase === 'claim-decision' && state.claimOptions.length > 0 && (
+            <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-4 space-y-3">
+              <div className="text-sm font-bold text-amber-300 text-center">
+                {state.message}
+              </div>
+              <div className="text-xs text-slate-400 text-center">
+                Claiming makes your hand open (no longer concealed), which affects scoring.
+              </div>
+              <div className="flex flex-col gap-2">
+                {state.claimOptions.map((claim, idx) => {
+                  const desc = claim.type === 'pong'
+                    ? `Pong — take ${tileFullName(claim.tile)} to form a triplet`
+                    : `Chow — take ${tileFullName(claim.tile)} to form ${claim.chowTiles ? claim.chowTiles.map(t => tileFullName(t)).join(' + ') + ' + ' + tileFullName(claim.tile) : 'a sequence'}`;
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => handleClaim(claim)}
+                      className="w-full bg-amber-600 hover:bg-amber-700 text-white py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                    >
+                      <TileSVG tile={claim.tile} size="sm" highlighted />
+                      {desc}
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={handleSkipClaim}
+                  className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 py-2.5 rounded-lg text-sm"
+                >
+                  Skip — keep hand concealed
+                </button>
+              </div>
             </div>
           )}
 

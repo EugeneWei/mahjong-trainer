@@ -22,10 +22,17 @@ import { fastPickDiscard } from './montecarlo';
 
 // ---- Types ----
 
+export interface OpenMeld {
+  type: 'chow' | 'pong';
+  tiles: TileIndex[];       // the 3 tile indices in the meld
+  claimedFrom: number;      // which player's discard was claimed
+}
+
 export interface PlayerState {
-  hand: TileCounts;       // 13-tile hand (or 14 after draw)
-  discards: TileIndex[];  // river of discarded tiles (in order)
-  isHuman: boolean;       // true for player 0 (the user)
+  hand: TileCounts;         // closed hand tiles (13 normally, 14 after draw/claim before discard)
+  discards: TileIndex[];    // river of discarded tiles (in order)
+  openMelds: OpenMeld[];    // melds claimed from other players
+  isHuman: boolean;         // true for player 0 (the user)
   seatWind: Wind;
 }
 
@@ -39,6 +46,13 @@ export interface GameState {
   deadTiles: TileCounts;   // all visible/discarded tiles aggregated
 }
 
+export interface ClaimOption {
+  type: 'pong' | 'chow';
+  tile: TileIndex;            // the discarded tile being claimed
+  fromPlayer: number;         // who discarded it
+  chowTiles?: [TileIndex, TileIndex]; // the 2 tiles from your hand (for chow)
+}
+
 export interface GameTurn {
   player: number;
   drawnTile: TileIndex;
@@ -47,6 +61,7 @@ export interface GameTurn {
   handAfter: TileCounts;
   analysis?: AnalysisResult;  // only for human player
   isWin: boolean;
+  claim?: ClaimOption;        // if this turn resulted from claiming a discard
 }
 
 export interface GameSimOptions {
@@ -92,6 +107,7 @@ export function initializeGame(options?: GameSimOptions): GameState {
     players.push({
       hand,
       discards: [],
+      openMelds: [],
       isHuman: p === 0,
       seatWind: SEAT_WINDS[p],
     });
@@ -136,12 +152,13 @@ export function getLiveTileCount(state: GameState, tileIndex: TileIndex, playerI
 
 /** Build a GameContext from the current game state for a specific player */
 export function buildGameContext(state: GameState, playerIdx: number): GameContext {
+  const player = state.players[playerIdx];
   return {
-    seatWind: state.players[playerIdx].seatWind,
+    seatWind: player.seatWind,
     prevailingWind: state.prevailingWind,
     wallRemaining: getWallRemaining(state),
     isSelfDrawn: true,
-    isConcealed: true,
+    isConcealed: player.openMelds.length === 0,
     bonusTiles: [],
   };
 }
@@ -354,4 +371,135 @@ export function simulateFullGame(rulesetMode: RulesetMode, options?: GameSimOpti
   }
 
   return allTurns;
+}
+
+// ---- Claim detection ----
+
+/** Check if a player can pong (claim a triplet) from a discarded tile.
+ *  Pong can be claimed from ANY player's discard. */
+export function canPong(state: GameState, playerIdx: number, discardedTile: TileIndex): boolean {
+  return state.players[playerIdx].hand[discardedTile] >= 2;
+}
+
+/** Check all possible chow claims for a player from a discarded tile.
+ *  Chow can only be claimed from the player to your LEFT (the player whose turn is
+ *  immediately before yours in turn order).
+ *  Returns array of possible chow combinations (the 2 tiles from hand). */
+export function getChowOptions(
+  state: GameState,
+  playerIdx: number,
+  discardedTile: TileIndex,
+  fromPlayer: number
+): [TileIndex, TileIndex][] {
+  // Chow only from player to your left (previous player in turn order)
+  const leftPlayer = (playerIdx + 3) % 4; // player before you
+  if (fromPlayer !== leftPlayer) return [];
+
+  // Chow only works with suit tiles (not honors)
+  if (discardedTile >= 27) return []; // WINDS_START = 27
+
+  const hand = state.players[playerIdx].hand;
+  const suitStart = Math.floor(discardedTile / 9) * 9;
+  const rank = discardedTile - suitStart;
+  const options: [TileIndex, TileIndex][] = [];
+
+  // The discarded tile could be the low, middle, or high of a sequence
+
+  // As low tile: need rank+1, rank+2
+  if (rank + 2 < 9) {
+    const t1 = suitStart + rank + 1;
+    const t2 = suitStart + rank + 2;
+    if (hand[t1] >= 1 && hand[t2] >= 1) {
+      options.push([t1, t2]);
+    }
+  }
+
+  // As middle tile: need rank-1, rank+1
+  if (rank >= 1 && rank + 1 < 9) {
+    const t1 = suitStart + rank - 1;
+    const t2 = suitStart + rank + 1;
+    if (hand[t1] >= 1 && hand[t2] >= 1) {
+      options.push([t1, t2]);
+    }
+  }
+
+  // As high tile: need rank-2, rank-1
+  if (rank >= 2) {
+    const t1 = suitStart + rank - 2;
+    const t2 = suitStart + rank - 1;
+    if (hand[t1] >= 1 && hand[t2] >= 1) {
+      options.push([t1, t2]);
+    }
+  }
+
+  return options;
+}
+
+/** Get all claim options available to the human (player 0) for a given discard */
+export function getClaimOptions(
+  state: GameState,
+  discardedTile: TileIndex,
+  fromPlayer: number
+): ClaimOption[] {
+  const options: ClaimOption[] = [];
+
+  // Check pong
+  if (canPong(state, 0, discardedTile)) {
+    options.push({
+      type: 'pong',
+      tile: discardedTile,
+      fromPlayer,
+    });
+  }
+
+  // Check chow options
+  const chows = getChowOptions(state, 0, discardedTile, fromPlayer);
+  for (const [t1, t2] of chows) {
+    options.push({
+      type: 'chow',
+      tile: discardedTile,
+      fromPlayer,
+      chowTiles: [t1, t2],
+    });
+  }
+
+  return options;
+}
+
+/** Execute a claim: take the discarded tile, form an open meld, give player 14 tiles.
+ *  The discard is removed from the river of the player who discarded it.
+ *  After claiming, the human has 14 tiles and must discard. */
+export function executeClaim(state: GameState, claim: ClaimOption): void {
+  const player = state.players[0]; // human is always player 0
+  const fromPlayerState = state.players[claim.fromPlayer];
+
+  // Remove the tile from the discarder's river (it was the last discard)
+  const riverIdx = fromPlayerState.discards.lastIndexOf(claim.tile);
+  if (riverIdx !== -1) {
+    fromPlayerState.discards.splice(riverIdx, 1);
+    state.deadTiles[claim.tile]--;
+  }
+
+  // Add the claimed tile to human's hand
+  player.hand[claim.tile]++;
+
+  // Record the open meld
+  if (claim.type === 'pong') {
+    player.openMelds.push({
+      type: 'pong',
+      tiles: [claim.tile, claim.tile, claim.tile],
+      claimedFrom: claim.fromPlayer,
+    });
+  } else if (claim.type === 'chow' && claim.chowTiles) {
+    const allTiles = [claim.chowTiles[0], claim.tile, claim.chowTiles[1]].sort((a, b) => a - b);
+    player.openMelds.push({
+      type: 'chow',
+      tiles: allTiles,
+      claimedFrom: claim.fromPlayer,
+    });
+  }
+
+  // After claiming, human has 14 tiles and needs to discard
+  // The turn order jumps to human (player 0)
+  state.currentPlayer = 0;
 }
