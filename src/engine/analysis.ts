@@ -752,6 +752,150 @@ export function tileFullName(index: TileIndex): string {
   return `${info.rank} of ${SUIT_NAMES[info.suit]}`;
 }
 
+// ---- Claim Decision Analysis ----
+
+export interface ClaimAnalysis {
+  recommendation: 'claim' | 'skip';
+  claimShanten: number;
+  skipShanten: number;
+  claimPaths: HandPath[];   // winning paths if you claim (open hand)
+  skipPaths: HandPath[];    // winning paths if you skip (concealed hand)
+  explanation: string;      // detailed explanation of the tradeoff
+}
+
+/**
+ * Analyze the tradeoff between claiming a discard (pong/chow) vs skipping.
+ * Compares the hand after claiming (open, 14 tiles) vs the current hand (concealed, 13 tiles).
+ */
+export function analyzeClaimDecision(
+  currentHand: TileCounts,
+  claimedTile: TileIndex,
+  claimType: 'pong' | 'chow',
+  chowTiles: TileIndex[] | undefined,
+  ctx: GameContext,
+  mode: RulesetMode = 'hk',
+  deadTiles?: TileCounts
+): ClaimAnalysis {
+  const config = getRulesetConfig(mode);
+  const unit = config.unit;
+  const min = config.minimum;
+
+  // Current hand state (13 tiles, concealed)
+  const skipShanten = calculateShanten(currentHand, config.sevenPairsEnabled);
+  const skipCtx: GameContext = { ...ctx, isConcealed: true };
+  const skipPaths = findWinningPaths(currentHand, skipCtx, mode);
+
+  // Simulate claiming: add the tile to hand (14 tiles, open)
+  const claimHand = currentHand.slice();
+  claimHand[claimedTile]++;
+  const claimShanten = calculateShanten(claimHand, config.sevenPairsEnabled);
+  const claimCtx: GameContext = { ...ctx, isConcealed: false };
+  const claimPaths = findWinningPaths(claimHand, claimCtx, mode);
+
+  // Build explanation
+  const parts: string[] = [];
+
+  // Shanten comparison
+  const shantenDiff = claimShanten - skipShanten;
+  if (shantenDiff < 0) {
+    parts.push(`Claiming reduces your shanten from ${skipShanten} to ${claimShanten} — bringing you ${-shantenDiff} step${-shantenDiff > 1 ? 's' : ''} closer to winning.`);
+  } else if (shantenDiff === 0) {
+    parts.push(`Claiming keeps your shanten at ${skipShanten} — no change in distance to winning.`);
+  } else {
+    parts.push(`Claiming actually increases your shanten to ${claimShanten} — this is unusual and generally not recommended.`);
+  }
+
+  // What you gain by claiming
+  parts.push('');
+  parts.push('IF YOU CLAIM (open hand):');
+  if (claimType === 'pong') {
+    parts.push(`You form a pong of ${tileFullName(claimedTile)} — a guaranteed complete meld.`);
+    // Check if it's a value pong
+    if (claimedTile >= DRAGONS_START) {
+      parts.push(`This is a Dragon pong worth 1 ${unit}!`);
+    } else if (claimedTile >= WINDS_START) {
+      const isSeat = claimedTile === WINDS_START + ctx.seatWind;
+      const isPrev = claimedTile === WINDS_START + ctx.prevailingWind;
+      if (isSeat && isPrev) parts.push(`This is both your Seat Wind and Prevailing Wind — worth 2 ${unit}!`);
+      else if (isSeat) parts.push(`This is your Seat Wind — worth 1 ${unit}.`);
+      else if (isPrev) parts.push(`This is the Prevailing Wind — worth 1 ${unit}.`);
+      else parts.push('This is a non-scoring wind — no direct fan value from the pong itself.');
+    }
+  } else {
+    const allTiles = chowTiles ? [...chowTiles, claimedTile].sort((a, b) => a - b) : [claimedTile];
+    parts.push(`You form a chow: ${allTiles.map(tileFullName).join(', ')}.`);
+  }
+
+  // Scoring paths after claiming
+  if (claimPaths.length > 0) {
+    parts.push(`Hands you can build toward (open): ${claimPaths.slice(0, 3).map(p => `${p.name} (${p.fan} ${unit})`).join(', ')}.`);
+  }
+
+  // What you lose by claiming
+  parts.push('');
+  parts.push('Your hand becomes OPEN — you lose:');
+  const losses: string[] = [];
+  losses.push(`Concealed Hand bonus (1 ${unit})`);
+  losses.push(`Self-Drawn bonus (1 ${unit}) becomes less likely to combine with Concealed`);
+  if (config.sevenPairsEnabled) losses.push('Seven Pairs is no longer possible');
+  // Check if flush path is broken
+  const claimComp = analyzeComposition(claimHand);
+  const skipComp = analyzeComposition(currentHand);
+  const claimNonZeroSuits = claimComp.suitCounts.filter(c => c > 0).length;
+  const skipMaxSuit = Math.max(...skipComp.suitCounts);
+  if (claimNonZeroSuits > 1 && skipMaxSuit >= 8) {
+    losses.push('May weaken your flush concentration');
+  }
+  parts.push(`  ${losses.join('; ')}.`);
+
+  // What you keep by skipping
+  parts.push('');
+  parts.push('IF YOU SKIP (keep concealed):');
+  parts.push('Your hand stays concealed, preserving Concealed Hand + Self-Drawn potential (2 fan combined).');
+  if (skipPaths.length > 0) {
+    parts.push(`Hands you can build toward (concealed): ${skipPaths.slice(0, 3).map(p => `${p.name} (${p.fan} ${unit})`).join(', ')}.`);
+  }
+
+  // Recommendation
+  let recommendation: 'claim' | 'skip';
+
+  // Factors favoring claim:
+  let claimScore = 0;
+  if (shantenDiff < 0) claimScore += 3 * (-shantenDiff); // shanten reduction is very valuable
+  if (claimedTile >= DRAGONS_START) claimScore += 3; // value pong
+  if (claimedTile >= WINDS_START && claimedTile < DRAGONS_START) {
+    if (claimedTile === WINDS_START + ctx.seatWind) claimScore += 3;
+    if (claimedTile === WINDS_START + ctx.prevailingWind) claimScore += 3;
+  }
+  if (claimType === 'pong' && skipComp.tripletCount >= 2) claimScore += 2; // All Pongs path
+  if (ctx.wallRemaining < 30) claimScore += 2; // late game — speed matters more
+
+  // Factors favoring skip:
+  let skipScore = 0;
+  skipScore += 2; // concealed hand value
+  if (skipMaxSuit >= 8) skipScore += 3; // flush potential
+  if (skipShanten <= 1) skipScore += 2; // already close, don't need the claim
+  if (ctx.wallRemaining > 50) skipScore += 1; // early game — keep options open
+
+  recommendation = claimScore > skipScore ? 'claim' : 'skip';
+
+  parts.push('');
+  if (recommendation === 'claim') {
+    parts.push(`RECOMMENDATION: Claim the ${claimType}. The immediate benefit (${shantenDiff < 0 ? 'shanten reduction + ' : ''}${claimedTile >= DRAGONS_START || (claimedTile >= WINDS_START && (claimedTile === WINDS_START + ctx.seatWind || claimedTile === WINDS_START + ctx.prevailingWind)) ? 'value pong + ' : ''}guaranteed meld) outweighs losing the concealed hand bonus.`);
+  } else {
+    parts.push(`RECOMMENDATION: Skip. Keeping your hand concealed preserves more scoring potential${skipMaxSuit >= 8 ? ' (especially your flush path)' : ''}. The ${claimType} doesn't add enough value to justify going open.`);
+  }
+
+  return {
+    recommendation,
+    claimShanten,
+    skipShanten,
+    claimPaths,
+    skipPaths,
+    explanation: parts.join('\n'),
+  };
+}
+
 export function describeHandStrategy(tiles: TileCounts, ctx: GameContext, mode: RulesetMode = 'hk'): string {
   const config = getRulesetConfig(mode);
   const shanten = calculateShanten(tiles, config.sevenPairsEnabled);

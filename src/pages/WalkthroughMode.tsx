@@ -10,8 +10,8 @@ import {
   type TileIndex,
 } from '../engine/tiles';
 import { createDefaultGameContext, type GameContext } from '../engine/hand';
-import { tileFullName, analyzeHand } from '../engine/analysis';
-import type { AnalysisResult } from '../engine/analysis';
+import { tileFullName, analyzeHand, analyzeClaimDecision } from '../engine/analysis';
+import type { AnalysisResult, ClaimAnalysis } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
 import { getRulesetConfig } from '../engine/rulesets';
 import GlossaryLinkedText from '../components/shared/GlossaryLinkedText';
@@ -47,6 +47,7 @@ interface WalkthroughState {
   humanAnalysis: AnalysisResult | null;
   selectedTile: TileIndex | null;  // two-step discard: selected but not yet confirmed
   claimOptions: ClaimOption[];     // available pong/chow options from last AI discard
+  claimAnalyses: ClaimAnalysis[];  // analysis for each claim option
   pendingAITurns: GameTurn[];      // AI turns that happened before the claim opportunity
 }
 
@@ -73,6 +74,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
       return;
@@ -88,6 +90,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
       return;
@@ -149,12 +152,18 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
     } else if (result.type === 'claim-available') {
-      // An AI discarded something the human can claim
+      // An AI discarded something the human can claim — analyze each option
       const lastAI = result.aiTurns[result.aiTurns.length - 1];
       const windName = ['East', 'South', 'West', 'North'][gameState.players[lastAI.player].seatWind];
+      const ctx = buildGameContext(gameState, 0);
+      const humanHand = gameState.players[0].hand;
+      const analyses = result.claimOptions!.map(claim =>
+        analyzeClaimDecision(humanHand, claim.tile, claim.type, claim.chowTiles, ctx, rulesetMode, gameState.deadTiles)
+      );
       setState({
         ...state,
         allTurns: [...state.allTurns.slice(0, -1), updatedHumanTurn, ...result.aiTurns],
@@ -164,6 +173,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: result.claimOptions!,
+        claimAnalyses: analyses,
         pendingAITurns: result.aiTurns,
       });
     } else {
@@ -181,6 +191,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
     }
@@ -272,6 +283,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       humanAnalysis: analysis,
       selectedTile: null,
       claimOptions: [],
+      claimAnalyses: [],
+      pendingAITurns: [],
     });
   }, [state, rulesetMode]);
 
@@ -293,17 +306,24 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
     } else if (result.type === 'claim-available') {
       const lastAI = result.aiTurns[result.aiTurns.length - 1];
       const windName = ['East', 'South', 'West', 'North'][gameState.players[lastAI.player].seatWind];
+      const ctx = buildGameContext(gameState, 0);
+      const humanHand = gameState.players[0].hand;
+      const analyses = result.claimOptions!.map(claim =>
+        analyzeClaimDecision(humanHand, claim.tile, claim.type, claim.chowTiles, ctx, rulesetMode, gameState.deadTiles)
+      );
       setState({
         ...state,
         allTurns: [...state.allTurns, ...result.aiTurns],
         phase: 'claim-decision',
         message: `${windName} discarded ${tileFullName(lastAI.discardedTile!)}. You can claim this tile!`,
         claimOptions: result.claimOptions!,
+        claimAnalyses: analyses,
         pendingAITurns: [...state.pendingAITurns, ...result.aiTurns],
         selectedTile: null,
       });
@@ -321,6 +341,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
     }
@@ -341,6 +362,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
       return;
@@ -356,6 +378,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
         humanAnalysis: null,
         selectedTile: null,
         claimOptions: [],
+        claimAnalyses: [],
         pendingAITurns: [],
       });
       return;
@@ -483,38 +506,82 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
             </div>
           )}
 
-          {/* Claim decision: pong/chow/skip */}
+          {/* Claim decision: pong/chow/skip with analysis */}
           {state.phase === 'claim-decision' && state.claimOptions.length > 0 && (
-            <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-4 space-y-3">
-              <div className="text-sm font-bold text-amber-300 text-center">
-                {state.message}
+            <div className="space-y-3">
+              {/* Header */}
+              <div className="bg-amber-900/30 border border-amber-700/50 rounded-lg p-4">
+                <div className="text-base font-bold text-amber-300 text-center">
+                  {state.message}
+                </div>
               </div>
-              <div className="text-xs text-slate-400 text-center">
-                Claiming makes your hand open (no longer concealed), which affects scoring.
-              </div>
-              <div className="flex flex-col gap-2">
-                {state.claimOptions.map((claim, idx) => {
-                  const desc = claim.type === 'pong'
-                    ? `Pong — take ${tileFullName(claim.tile)} to form a triplet`
-                    : `Chow — take ${tileFullName(claim.tile)} to form ${claim.chowTiles ? claim.chowTiles.map(t => tileFullName(t)).join(' + ') + ' + ' + tileFullName(claim.tile) : 'a sequence'}`;
-                  return (
-                    <button
-                      key={idx}
-                      onClick={() => handleClaim(claim)}
-                      className="w-full bg-amber-600 hover:bg-amber-700 text-white py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
-                    >
+
+              {/* Analysis for each claim option */}
+              {state.claimOptions.map((claim, idx) => {
+                const analysis = state.claimAnalyses[idx];
+                const isRecommended = analysis?.recommendation === 'claim';
+                const desc = claim.type === 'pong'
+                  ? `Pong — take ${tileFullName(claim.tile)} to form a triplet`
+                  : `Chow — take ${tileFullName(claim.tile)} to form ${claim.chowTiles ? [...claim.chowTiles, claim.tile].sort((a, b) => a - b).map(t => tileFullName(t)).join(', ') : 'a sequence'}`;
+
+                return (
+                  <div key={idx} className={`rounded-lg p-3 ${isRecommended ? 'bg-green-900/20 border border-green-700/40' : 'bg-slate-800/50 border border-slate-700/40'}`}>
+                    <div className="flex items-center gap-2 mb-2">
                       <TileSVG tile={claim.tile} size="sm" highlighted />
-                      {desc}
+                      <span className="text-sm font-medium text-slate-200">{desc}</span>
+                      {isRecommended && (
+                        <span className="text-[10px] bg-green-700/50 text-green-300 px-1.5 py-0.5 rounded font-bold ml-auto">RECOMMENDED</span>
+                      )}
+                    </div>
+                    {analysis && (
+                      <div className="text-xs text-slate-400 leading-relaxed whitespace-pre-line mb-2">
+                        <GlossaryLinkedText text={analysis.explanation} className="text-xs text-slate-400 leading-relaxed" />
+                      </div>
+                    )}
+                    <button
+                      onClick={() => handleClaim(claim)}
+                      className={`w-full py-2 rounded-lg text-sm font-medium ${
+                        isRecommended
+                          ? 'bg-green-600 hover:bg-green-700 text-white'
+                          : 'bg-amber-600 hover:bg-amber-700 text-white'
+                      }`}
+                    >
+                      Claim {claim.type === 'pong' ? 'Pong' : 'Chow'}
                     </button>
-                  );
-                })}
-                <button
-                  onClick={handleSkipClaim}
-                  className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 py-2.5 rounded-lg text-sm"
-                >
-                  Skip — keep hand concealed
-                </button>
-              </div>
+                  </div>
+                );
+              })}
+
+              {/* Skip option with analysis */}
+              {(() => {
+                const anyRecommendsSkip = state.claimAnalyses.some(a => a?.recommendation === 'skip');
+                return (
+                  <div className={`rounded-lg p-3 ${anyRecommendsSkip ? 'bg-blue-900/20 border border-blue-700/40' : 'bg-slate-800/50 border border-slate-700/40'}`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm font-medium text-slate-200">Skip — keep hand concealed</span>
+                      {anyRecommendsSkip && (
+                        <span className="text-[10px] bg-blue-700/50 text-blue-300 px-1.5 py-0.5 rounded font-bold ml-auto">RECOMMENDED</span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-400 mb-2">
+                      Keeps Concealed Hand + Self-Drawn potential (2 {getRulesetConfig(rulesetMode).unit} combined). Your hand stays flexible for higher-scoring patterns.
+                      {state.claimAnalyses[0] && state.claimAnalyses[0].skipPaths.length > 0 && (
+                        <span> Concealed paths: {state.claimAnalyses[0].skipPaths.slice(0, 3).map(p => `${p.name} (${p.fan} ${getRulesetConfig(rulesetMode).unit})`).join(', ')}.</span>
+                      )}
+                    </div>
+                    <button
+                      onClick={handleSkipClaim}
+                      className={`w-full py-2 rounded-lg text-sm ${
+                        anyRecommendsSkip
+                          ? 'bg-blue-600 hover:bg-blue-700 text-white font-medium'
+                          : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
+                      }`}
+                    >
+                      Skip
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
