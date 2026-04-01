@@ -1,11 +1,14 @@
 // Table view component
-// Shows the game table with human's hand at bottom, 3 opponents' rivers around the edges,
-// and game info in the center.
+// Shows the game table with human's hand at bottom, 3 opponents' info around the edges,
+// and game info in the center. Each opponent shows face-down tiles + open melds + river.
 
+import PlayerPanel from '../tiles/PlayerPanel';
 import DiscardRiver from '../tiles/DiscardRiver';
 import TileRow from '../tiles/TileRow';
-import type { PlayerState, GameState } from '../../engine/game-sim';
+import TileSVG from '../tiles/TileSVG';
+import type { GameState } from '../../engine/game-sim';
 import { getWallRemaining } from '../../engine/game-sim';
+import { totalTileCount } from '../../engine/tiles';
 import type { TileCounts, TileIndex } from '../../engine/tiles';
 
 const WIND_NAMES = ['East', 'South', 'West', 'North'];
@@ -18,8 +21,8 @@ interface TableViewProps {
   dangerTiles?: TileIndex[];
   highlightedTiles?: TileIndex[];
   onTileClick?: (tile: TileIndex) => void;
-  prompt?: string; // action prompt shown prominently above the hand
-  children?: React.ReactNode; // center area content
+  prompt?: string;
+  children?: React.ReactNode;
 }
 
 export default function TableView({
@@ -35,9 +38,9 @@ export default function TableView({
 }: TableViewProps) {
   const wallRemaining = getWallRemaining(gameState);
   const players = gameState.players;
+  const humanPlayer = players[0];
 
   // Player 0 = human (bottom), 1 = right, 2 = top, 3 = left
-  // This matches the standard Mahjong table perspective
   const topPlayer = players[2];
   const leftPlayer = players[3];
   const rightPlayer = players[1];
@@ -51,60 +54,57 @@ export default function TableView({
         <span>Wall: {wallRemaining}</span>
       </div>
 
-      {/* Table layout — mobile-first stacked, wider screens use grid */}
-      <div className="space-y-2 lg:grid lg:grid-cols-[140px_1fr_140px] lg:grid-rows-[auto_1fr_auto] lg:gap-2 lg:space-y-0">
-        {/* Top opponent river (player across) */}
-        <div className="lg:col-start-2 lg:col-end-3 lg:row-start-1">
+      {/* Opponent panels — stacked vertically on mobile */}
+      <div className="space-y-2">
+        {/* Top opponent (across) */}
+        <div className="bg-slate-800/30 rounded-lg p-2">
+          <PlayerPanel player={topPlayer} compact tilesPerRow={6} />
+        </div>
+
+        {/* Left and Right opponents side by side */}
+        <div className="grid grid-cols-2 gap-2">
           <div className="bg-slate-800/30 rounded-lg p-2">
-            <DiscardRiver
-              discards={topPlayer.discards}
-              seatWind={topPlayer.seatWind}
-              compact
-            />
+            <PlayerPanel player={leftPlayer} compact tilesPerRow={5} />
           </div>
-        </div>
-
-        {/* Left opponent river */}
-        <div className="lg:col-start-1 lg:col-end-2 lg:row-start-2">
           <div className="bg-slate-800/30 rounded-lg p-2">
-            <DiscardRiver
-              discards={leftPlayer.discards}
-              seatWind={leftPlayer.seatWind}
-              compact
-              tilesPerRow={4}
-            />
-          </div>
-        </div>
-
-        {/* Center area */}
-        <div className="lg:col-start-2 lg:col-end-3 lg:row-start-2">
-          {children}
-        </div>
-
-        {/* Right opponent river */}
-        <div className="lg:col-start-3 lg:col-end-4 lg:row-start-2">
-          <div className="bg-slate-800/30 rounded-lg p-2">
-            <DiscardRiver
-              discards={rightPlayer.discards}
-              seatWind={rightPlayer.seatWind}
-              compact
-              tilesPerRow={4}
-            />
-          </div>
-        </div>
-
-        {/* Bottom: human's river */}
-        <div className="lg:col-start-2 lg:col-end-3 lg:row-start-3">
-          <div className="bg-slate-800/30 rounded-lg p-2">
-            <DiscardRiver
-              discards={players[0].discards}
-              seatWind={players[0].seatWind}
-              isHuman
-              compact
-            />
+            <PlayerPanel player={rightPlayer} compact tilesPerRow={5} />
           </div>
         </div>
       </div>
+
+      {/* Center area */}
+      {children}
+
+      {/* Human's open melds (if any) */}
+      {humanPlayer.openMelds.length > 0 && (
+        <div className="bg-slate-800/40 rounded-lg p-2">
+          <div className="text-xs text-blue-400 font-medium mb-1">Your Open Melds</div>
+          <div className="flex flex-wrap gap-2">
+            {humanPlayer.openMelds.map((meld, idx) => (
+              <div key={idx} className="flex gap-px items-end bg-slate-700/30 rounded px-1.5 py-1">
+                <span className="text-[9px] text-slate-500 mr-1 self-center">
+                  {meld.type === 'pong' ? 'Pong' : 'Chow'}
+                </span>
+                {meld.tiles.map((tile, tidx) => (
+                  <TileSVG key={tidx} tile={tile} size="sm" />
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Human's discard river */}
+      {humanPlayer.discards.length > 0 && (
+        <div className="bg-slate-800/30 rounded-lg p-2">
+          <DiscardRiver
+            discards={humanPlayer.discards}
+            seatWind={humanPlayer.seatWind}
+            isHuman
+            compact
+          />
+        </div>
+      )}
 
       {/* Action prompt — prominent, right above the hand */}
       {prompt && (
@@ -113,9 +113,14 @@ export default function TableView({
         </div>
       )}
 
-      {/* Human's hand (large tiles at bottom) */}
+      {/* Human's closed hand (large tiles at bottom) */}
       <div className="bg-slate-800/50 rounded-lg p-3">
-        <div className="text-xs text-slate-400 mb-2">Your Hand ({WIND_NAMES[players[0].seatWind]})</div>
+        <div className="text-xs text-slate-400 mb-2">
+          Your Hand ({WIND_NAMES[humanPlayer.seatWind]})
+          {humanPlayer.openMelds.length > 0 && (
+            <span className="text-amber-400 ml-1">(Open)</span>
+          )}
+        </div>
         <TileRow
           tiles={humanHand}
           size="lg"

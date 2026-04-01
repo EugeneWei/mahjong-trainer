@@ -18,6 +18,7 @@ interface DiscardRiverProps {
   isHuman?: boolean;
   compact?: boolean;  // smaller tiles for table layout
   tilesPerRow?: number;
+  hideLabel?: boolean;
 }
 
 export default function DiscardRiver({
@@ -27,6 +28,7 @@ export default function DiscardRiver({
   isHuman = false,
   compact = false,
   tilesPerRow = 6,
+  hideLabel = false,
 }: DiscardRiverProps) {
   const displayLabel = label ?? `${WIND_LABELS[seatWind]}${isHuman ? ' (You)' : ''}`;
   const tileSize = compact ? 'sm' : 'sm';
@@ -39,15 +41,17 @@ export default function DiscardRiver({
 
   return (
     <div className="space-y-0.5">
-      <div className={`text-xs font-medium ${isHuman ? 'text-blue-400' : 'text-slate-500'}`}>
-        {displayLabel}
-        {discards.length > 0 && (
-          <span className="text-slate-600 ml-1">({discards.length})</span>
-        )}
-      </div>
-      {discards.length === 0 ? (
+      {!hideLabel && (
+        <div className={`text-xs font-medium ${isHuman ? 'text-blue-400' : 'text-slate-500'}`}>
+          {displayLabel}
+          {discards.length > 0 && (
+            <span className="text-slate-600 ml-1">({discards.length})</span>
+          )}
+        </div>
+      )}
+      {discards.length === 0 && !hideLabel ? (
         <div className="text-xs text-slate-600 italic">No discards</div>
-      ) : (
+      ) : discards.length > 0 ? (
         <div className="space-y-0">
           {rows.map((row, rowIdx) => (
             <div key={rowIdx} className="flex gap-px">
@@ -65,7 +69,7 @@ export default function DiscardRiver({
             </div>
           ))}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
