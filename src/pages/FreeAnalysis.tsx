@@ -43,7 +43,8 @@ export default function FreeAnalysis({ rulesetMode }: FreeAnalysisProps) {
     method: mcMethod,
     shanten: mcShanten,
     run: runMC,
-  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 500, true);
+    runMore: runMoreMC,
+  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 1000, true);
 
   const runAnalysis = useCallback(
     (hand: TileCounts, ctx: GameContext) => {
@@ -180,6 +181,8 @@ export default function FreeAnalysis({ rulesetMode }: FreeAnalysisProps) {
           method={mcMethod}
           shanten={mcShanten}
           onRun={runMC}
+          onRunMore={runMoreMC}
+          runMoreBatchSize={1000}
         />
       )}
 
