@@ -8,7 +8,6 @@ import FaceDownTile from './FaceDownTile';
 import DiscardRiver from './DiscardRiver';
 import type { OpenMeld, PlayerState } from '../../engine/game-sim';
 import { totalTileCount } from '../../engine/tiles';
-import type { Wind } from '../../engine/tiles';
 
 const WIND_LABELS: Record<number, string> = {
   0: 'East', 1: 'South', 2: 'West', 3: 'North',

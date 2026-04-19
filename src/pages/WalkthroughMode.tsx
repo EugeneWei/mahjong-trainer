@@ -6,10 +6,8 @@ import TableView from '../components/layout/TableView';
 import {
   cloneTileCounts,
   totalTileCount,
-  type TileCounts,
   type TileIndex,
 } from '../engine/tiles';
-import { createDefaultGameContext, type GameContext } from '../engine/hand';
 import { tileFullName, analyzeHand, analyzeClaimDecision } from '../engine/analysis';
 import type { AnalysisResult, ClaimAnalysis } from '../engine/analysis';
 import type { RulesetMode } from '../engine/rulesets';
@@ -21,7 +19,6 @@ import {
   simulateAITurn,
   simulateHumanDraw,
   executeHumanDiscard,
-  advanceAITurns,
   getWallRemaining,
   getDeadTiles,
   buildGameContext,
@@ -53,7 +50,7 @@ interface WalkthroughState {
 
 export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
   const [state, setState] = useState<WalkthroughState | null>(null);
-  const [viewTurnIndex, setViewTurnIndex] = useState(-1); // -1 = current live view
+  const [, setViewTurnIndex] = useState(-1); // -1 = current live view
 
   const config = getRulesetConfig(rulesetMode);
 
@@ -105,6 +102,7 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
       humanAnalysis: humanTurn.analysis ?? null,
       selectedTile: null,
       claimOptions: [],
+      claimAnalyses: [],
       pendingAITurns: [],
     });
     setViewTurnIndex(-1);

@@ -17,7 +17,6 @@ import { calculateShanten } from './shanten';
 import { scoreHand, isWinningHand } from './scoring';
 import type { RulesetMode } from './rulesets';
 import { getRulesetConfig } from './rulesets';
-import { getAcceptanceTiles } from './shanten';
 import { SeededRNG } from './generator';
 
 export type AnalysisMethod =
@@ -677,10 +676,7 @@ export function runHybridAnalysis(
   const shanten = calculateShanten(tiles, includeSevenPairs);
 
   if (shanten === -1) {
-    // Hand is already complete — just score it
-    const score = scoreHand(tiles, { ...gameContext, isSelfDrawn: true }, rulesetMode);
-    const payout = score ? calculatePayout(score.fan, rulesetMode) : 0;
-    // No discard needed; return empty results since the hand is won
+    // Hand is already complete — no discard needed, return empty results
     return {
       results: [],
       method: { type: 'exact', label: 'Complete hand' },

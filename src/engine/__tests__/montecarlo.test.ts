@@ -4,7 +4,6 @@ import {
   exactTenpaiAnalysis,
   exactIishantenAnalysis,
   runHybridAnalysis,
-  type MonteCarloRequest,
 } from '../montecarlo';
 import { createEmptyTileCounts, totalTileCount } from '../tiles';
 import { createDefaultGameContext } from '../hand';

@@ -491,7 +491,7 @@ function findWinningPaths(tiles: TileCounts, ctx: GameContext, _mode: RulesetMod
 }
 
 // Early game directions: broad strategic advice for shanten 4+ hands
-function findEarlyGameDirections(tiles: TileCounts, comp: HandComposition, ctx: GameContext, shanten: number): HandPath[] {
+function findEarlyGameDirections(tiles: TileCounts, comp: HandComposition, ctx: GameContext, _shanten: number): HandPath[] {
   const paths: HandPath[] = [];
   const nonZeroSuits = comp.suitCounts.filter(c => c > 0).length;
   const maxSuit = Math.max(...comp.suitCounts);
@@ -774,11 +774,10 @@ export function analyzeClaimDecision(
   chowTiles: TileIndex[] | undefined,
   ctx: GameContext,
   mode: RulesetMode = 'hk',
-  deadTiles?: TileCounts
+  _deadTiles?: TileCounts
 ): ClaimAnalysis {
   const config = getRulesetConfig(mode);
   const unit = config.unit;
-  const min = config.minimum;
 
   // Current hand state (13 tiles, concealed)
   const skipShanten = calculateShanten(currentHand, config.sevenPairsEnabled);

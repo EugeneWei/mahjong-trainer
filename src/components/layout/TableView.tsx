@@ -8,7 +8,6 @@ import TileRow from '../tiles/TileRow';
 import TileSVG from '../tiles/TileSVG';
 import type { GameState } from '../../engine/game-sim';
 import { getWallRemaining } from '../../engine/game-sim';
-import { totalTileCount } from '../../engine/tiles';
 import type { TileCounts, TileIndex } from '../../engine/tiles';
 
 const WIND_NAMES = ['East', 'South', 'West', 'North'];
