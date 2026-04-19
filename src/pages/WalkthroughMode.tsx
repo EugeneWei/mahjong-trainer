@@ -417,7 +417,8 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
     method: mcMethod,
     shanten: mcShanten,
     run: runMC,
-  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 300, false);
+    runMore: runMoreMC,
+  } = useMonteCarloAnalysis(mcTiles, mcCtx, rulesetMode, 1000, true);
 
   // Count human's turns for display
   const humanTurnCount = state ? state.allTurns.filter(t => t.player === 0).length : 0;
@@ -606,6 +607,22 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
           {/* Analysis section (during human's turn) */}
           {state.phase === 'human-turn' && state.humanAnalysis && (
             <>
+              {/* Monte Carlo (prioritized above per-move analysis) */}
+              {mcTiles && (
+                <MonteCarloPanel
+                  results={mcResults}
+                  progress={mcProgress}
+                  isRunning={mcRunning}
+                  error={mcError}
+                  rulesetMode={rulesetMode}
+                  method={mcMethod}
+                  shanten={mcShanten}
+                  onRun={runMC}
+                  onRunMore={runMoreMC}
+                  runMoreBatchSize={1000}
+                />
+              )}
+
               {/* Strategy explanation */}
               <div className="bg-slate-800/50 rounded-lg p-3">
                 <h3 className="text-sm font-medium text-slate-300 mb-1">Analysis</h3>
@@ -644,20 +661,6 @@ export default function WalkthroughMode({ rulesetMode }: WalkthroughModeProps) {
 
               {/* Full discard analysis */}
               <AnalysisPanel result={state.humanAnalysis} showTopN={3} showPaths={false} />
-
-              {/* Monte Carlo */}
-              {mcTiles && (
-                <MonteCarloPanel
-                  results={mcResults}
-                  progress={mcProgress}
-                  isRunning={mcRunning}
-                  error={mcError}
-                  rulesetMode={rulesetMode}
-                  method={mcMethod}
-                  shanten={mcShanten}
-                  onRun={runMC}
-                />
-              )}
             </>
           )}
         </>

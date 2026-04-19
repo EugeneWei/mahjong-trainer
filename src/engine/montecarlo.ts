@@ -720,9 +720,10 @@ export function runHybridAnalysis(
     };
   }
 
-  // Shanten 2-3: Monte Carlo with full sims
-  // Shanten 4+: Monte Carlo with fewer sims
-  const numSims = shanten <= 3 ? 500 : 200;
+  // Honor caller's requested sim count; scale down for very far-from-winning
+  // hands (shanten 4+) where each sim is slower and precision matters less.
+  const requestedSims = request.numSimulations;
+  const numSims = shanten <= 3 ? requestedSims : Math.max(1, Math.round(requestedSims * 0.4));
   const adjustedRequest = { ...request, numSimulations: numSims };
   const results = runMonteCarloAnalysis(adjustedRequest, onProgress);
   return {

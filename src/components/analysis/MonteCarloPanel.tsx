@@ -17,6 +17,8 @@ interface MonteCarloPanelProps {
   method?: AnalysisMethod | null;
   shanten?: number | null;
   onRun?: () => void;
+  onRunMore?: () => void;
+  runMoreBatchSize?: number;
 }
 
 export default function MonteCarloPanel({
@@ -28,6 +30,8 @@ export default function MonteCarloPanel({
   method,
   shanten,
   onRun,
+  onRunMore,
+  runMoreBatchSize = 1000,
 }: MonteCarloPanelProps) {
   const config = getRulesetConfig(rulesetMode);
   const unit = config.unit;
@@ -56,13 +60,25 @@ export default function MonteCarloPanel({
               </span>
             )}
           </div>
-          {onRun && !isRunning && (
-            <button
-              onClick={onRun}
-              className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1 rounded"
-            >
-              {results ? 'Re-run' : 'Run Analysis'}
-            </button>
+          {!isRunning && (
+            <div className="flex items-center gap-1.5">
+              {onRunMore && results && !isExact && (
+                <button
+                  onClick={onRunMore}
+                  className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-100 px-2.5 py-1 rounded"
+                >
+                  Run {runMoreBatchSize} more
+                </button>
+              )}
+              {onRun && (
+                <button
+                  onClick={onRun}
+                  className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1 rounded"
+                >
+                  {results ? 'Re-run' : 'Run Analysis'}
+                </button>
+              )}
+            </div>
           )}
         </div>
         <p className="text-xs text-slate-500">
